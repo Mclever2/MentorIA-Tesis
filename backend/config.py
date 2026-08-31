@@ -83,7 +83,11 @@ SECCION_ITEMS_MAP: dict[str, list[int]] = {
     "1.2 Objetivos (General y Específicos)":     [6, 7],
     "1.3 Importancia del estudio":               [8],
     "1.4 Justificación del estudio":             [10],
-    "2.2 Investigaciones antecedentes":          [11, 15],
+    # Los ítems 14/16/17 (citas, postura crítica, normas de citación) son TRANSVERSALES:
+    # se evalúan donde se USAN las fuentes (antecedentes y base teórica) y las normas
+    # también en Referencias. El 15 (texto↔referencias) se coteja en ambos extremos.
+    # La consolidación toma la mejor evidencia por ítem, así que no se dobla el conteo.
+    "2.2 Investigaciones antecedentes":          [11, 14, 15, 16, 17],
     "2.3 Base teórica (Variables)":              [12, 14, 16, 17],
     "2.4 Definición de términos básicos":        [13],
     "3.1–3.2 Hipótesis":                         [18, 19],
@@ -95,7 +99,7 @@ SECCION_ITEMS_MAP: dict[str, list[int]] = {
     "4.6 Procedimiento de ejecución":            [26],
     "4.7 Análisis de datos":                     [27],
     "5. Aspectos administrativos":               [28, 29, 30, 31],
-    "III. Referencias bibliográficas":           [32, 33],
+    "III. Referencias bibliográficas":           [15, 17, 32, 33],
 }
 
 SECCIONES_TESIS: list[dict] = [
@@ -249,6 +253,15 @@ def _mejor_semantica(seccion: str) -> tuple[str | None, float]:
     return mejor_key, mejor_jaccard
 
 
+# Secciones que la rúbrica UPAO NO califica: no deben heredar ítems por ancestro
+# numérico (p. ej. "1.5 Limitaciones" caía en "1. Título" y contaminaba su evaluación).
+_RE_SIN_RUBRICA = re.compile(
+    r"(limitacion|anexo|generalidad|acreditaci|dedicator|agradecimient|"
+    r"resumen|abstract|caratul|car[áa]tula|[íi]ndice)",
+    re.IGNORECASE,
+)
+
+
 def _seccion_rubrica_para(seccion: str) -> str | None:
     """
     Clave de SECCION_ITEMS_MAP que gobierna la rúbrica de `seccion` (o None).
@@ -262,6 +275,8 @@ def _seccion_rubrica_para(seccion: str) -> str | None:
       4. Semántica débil (cualquier solapamiento).
       5. Ancestro numérico subiendo niveles ('5.2.1' → '5.2' → '5').
     """
+    if _RE_SIN_RUBRICA.search(seccion or ""):
+        return None
     if seccion in SECCION_ITEMS_MAP:
         return seccion
 
@@ -298,6 +313,42 @@ def _buscar_items_seccion(seccion: str) -> list[int]:
     """Ítems de SECCION_ITEMS_MAP que aplican a `seccion` (vía la clave de rúbrica)."""
     key = _seccion_rubrica_para(seccion)
     return list(SECCION_ITEMS_MAP.get(key, [])) if key else []
+
+
+def resolver_unidad_toc(seccion: str, toc_nombres: list[str], _prof: int = 0) -> str | None:
+    """Como _seccion_rubrica_para, pero CONSCIENTE del TOC: herencia del padre.
+
+    Caso real que corrige: en un proyecto con «2.2 Base teórica» cuyo contenido vive
+    en «2.2.1 Variable independiente» / «2.2.2 Variable dependiente», los hijos
+    matchean débilmente con la unidad de Variables y se llevan el contenido de la
+    base teórica (que queda vacía → sus ítems salen "ausentes"). Regla:
+      - Match FUERTE propio (exacto o semántica ≥ 0.5) → manda el propio.
+      - Match débil/ninguno y el PADRE (por prefijo numérico en el TOC) resuelve
+        una unidad → hereda la del padre (el contenido pertenece a ese capítulo).
+      - Sin padre resoluble → comportamiento clásico (_seccion_rubrica_para).
+    """
+    if _RE_SIN_RUBRICA.search(seccion or ""):
+        return None
+    if seccion in SECCION_ITEMS_MAP:
+        return seccion
+
+    _, jaccard = _mejor_semantica(seccion)
+    if jaccard >= 0.5:
+        return _seccion_rubrica_para(seccion)
+
+    # Padre por prefijo numérico dentro del TOC real ('2.2.1' → sección con prefijo '2.2').
+    pref = _prefijo_num(seccion)
+    if pref and "." in pref and _prof < 4:
+        pref_padre = pref.rsplit(".", 1)[0]
+        padre = next(
+            (n for n in toc_nombres if n != seccion and _prefijo_num(n) == pref_padre), None
+        )
+        if padre:
+            unidad_padre = resolver_unidad_toc(padre, toc_nombres, _prof + 1)
+            if unidad_padre:
+                return unidad_padre
+
+    return _seccion_rubrica_para(seccion)
 
 
 def prefijos_evaluacion_para_seccion(seccion: str) -> list[str]:

@@ -70,6 +70,11 @@ Reglas:
 - JUSTIFICA SIEMPRE la nota: si el puntaje NO es el máximo ({escala}), la "razon" DEBE indicar,
   concreto y accionable, QUÉ FALTA para llegar al máximo (no basta con decir que "cumple
   adecuadamente"). Si es el máximo, di brevemente por qué cumple del todo.
+- NO seas complaciente: el máximo exige evidencia EXPLÍCITA en el texto (nómbrala en "razon").
+  Para ítems de VERIFICACIÓN de citas/referencias (correspondencia texto↔referencias, normas de
+  citación), NO asumas cumplimiento: usa el COTEJO DE CITAS si se te proporciona y nombra
+  ejemplos concretos (citas sin referencia, referencias duplicadas, formato inconsistente).
+  Sin evidencia verificable, no otorgues el máximo.
 
 Responde SOLO con JSON válido:
 {{"items": [{{"numero": <int>, "puntaje": <0-{escala}>, "aplica": true, "razon": "qué cumple y, si no es el máximo, qué falta concretamente para llegar a {escala}"}}],
@@ -114,13 +119,34 @@ FRAGMENTOS CLAVE DEL PROYECTO (título, problema, objetivos, hipótesis, variabl
 """
 
 
+def _chunks_por_seccion(doc) -> dict[str, list[str]]:
+    """Chunks del vector store agrupados por su sección RAW del TOC, en orden de lectura."""
+    result = doc.vector_store._collection.get(include=["metadatas", "documents"])
+    metadatas = result.get("metadatas") or []
+    documents = result.get("documents") or []
+    pares = sorted(
+        zip(metadatas, documents),
+        key=lambda md: (md[0] or {}).get("chunk_index", 0),
+    )
+    secciones: dict[str, list[str]] = {}
+    for meta, texto in pares:
+        secciones.setdefault((meta or {}).get("seccion", "Documento"), []).append(texto)
+    return secciones
+
+
 def _contenido_por_unidad_rubrica(doc) -> list[dict]:
     """
     Agrupa TODOS los chunks del vector store por UNIDAD DE RÚBRICA, en orden de
     lectura. '1.2.1' y '1.2.2' caen en '1.2 Objetivos…'; '4.1','4.2','4.3' caen en
     '4.1–4.3 Tipo, Método y Diseño'. Cada unidad conserva todos sus chunks (sin
     truncar) para que el diagnóstico lea la sección completa.
+
+    La resolución es CONSCIENTE del TOC (resolver_unidad_toc): una subsección con
+    match débil hereda la unidad de su capítulo padre, para que «2.2.1 Variable
+    independiente» bajo «2.2 Base teórica» no se lleve el contenido a Variables.
     """
+    from backend.config import resolver_unidad_toc
+
     result = doc.vector_store._collection.get(include=["metadatas", "documents"])
     metadatas = result.get("metadatas") or []
     documents = result.get("documents") or []
@@ -130,10 +156,17 @@ def _contenido_por_unidad_rubrica(doc) -> list[dict]:
         key=lambda md: (md[0] or {}).get("chunk_index", 0),
     )
 
+    toc_nombres = list(doc.estructura_toc or {})
+    cache_unidad: dict[str, str] = {}
+
     unidades: dict[str, dict] = {}
     for meta, texto in pares:
         seccion_raw = (meta or {}).get("seccion", "Documento")
-        clave = _seccion_rubrica_para(seccion_raw) or seccion_raw
+        if seccion_raw not in cache_unidad:
+            cache_unidad[seccion_raw] = (
+                resolver_unidad_toc(seccion_raw, toc_nombres) or seccion_raw
+            )
+        clave = cache_unidad[seccion_raw]
         u = unidades.setdefault(clave, {
             "unidad":        clave,
             "secciones_raw": [],
@@ -242,9 +275,100 @@ def _digest_coherencia(unidades: list[dict], max_por_sec: int = 450, tope: int =
     return "\n".join(partes)[:tope] or "(sin contexto disponible)"
 
 
+# ── Cotejo determinístico de citas (anti-complacencia, sin LLM) ────────────────
+# Citas parentéticas «(Apellido et al., 2023)» y narrativas «Apellido (2023)».
+_RE_CITA_PAREN = re.compile(
+    r"\(\s*([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-]+)[^()]{0,80}?,\s*((?:19|20)\d{2})[a-z]?\s*\)"
+)
+_RE_CITA_NARRativa = re.compile(
+    r"\b([A-ZÁÉÍÓÚÑ][a-záéíóúüñ\-]{3,})(?:\s+et\s+al\.?|\s+y\s+[A-ZÁÉÍÓÚÑ][a-záéíóúüñ\-]+)?\s*"
+    r"\(\s*((?:19|20)\d{2})[a-z]?\s*\)"
+)
+
+
+def _norm_txt(t: str) -> str:
+    return unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode("ascii").lower()
+
+
+def _cotejo_citas(unidades: list[dict]) -> dict | None:
+    """Coteja las citas en el TEXTO contra la lista de REFERENCIAS (determinístico).
+
+    Devuelve {"citas": n, "faltantes": ["Apellido (año)", …]} o None si el proyecto
+    no tiene sección de referencias detectable (no se puede cotejar → no se opina).
+    """
+    refs_chunks, cuerpo_chunks = [], []
+    for u in unidades:
+        destino = refs_chunks if _RE_SEC_REF_UNIDAD.search(u["unidad"]) else cuerpo_chunks
+        destino.extend(u["chunks"])
+    refs_texto = _norm_txt("\n".join(refs_chunks))
+    if len(refs_texto) < 200:
+        return None
+
+    cuerpo = "\n".join(cuerpo_chunks)
+    citas: set[tuple[str, str]] = set()
+    for rx in (_RE_CITA_PAREN, _RE_CITA_NARRativa):
+        for m in rx.finditer(cuerpo):
+            apellido = m.group(1).strip()
+            if len(apellido) > 3 and _norm_txt(apellido) not in ("segun", "figura", "tabla"):
+                citas.add((apellido, m.group(2)))
+
+    faltantes = sorted(
+        f"{ap} ({anio})" for ap, anio in citas if _norm_txt(ap) not in refs_texto
+    )
+    return {"citas": len(citas), "faltantes": faltantes}
+
+
+_RE_SEC_REF_UNIDAD = re.compile(r"referencia", re.IGNORECASE)
+_ITEMS_VERIFICACION_CITAS = {15, 17, 32, 33}
+
+
+def _aplicar_cotejo_a_calificacion(calificacion: dict, cotejo: dict | None, escala: int) -> None:
+    """Tope determinístico anti-complacencia: con citas sin referencia detectadas,
+    los ítems de correspondencia texto↔referencias (15 y 32) no pueden quedar en el
+    máximo aunque el LLM lo haya dado (evita el caso real: ítem 15 en 3/3 con una
+    cita no referenciada, contradiciendo al ítem 32). Recalcula el total."""
+    if not cotejo or not cotejo.get("faltantes"):
+        return
+    detalle = ", ".join(cotejo["faltantes"][:5])
+    umbral_ok = round(escala * 2 / 3)
+    ajustado = False
+    for it in calificacion.get("items") or []:
+        if it["numero"] not in (15, 32) or it["estado"] in ("na", "ausente"):
+            continue
+        if (it["puntaje"] or 0) >= escala:
+            it["puntaje"] = escala - 1
+            it["estado"] = "ok" if it["puntaje"] >= umbral_ok else "bajo"
+            it["razon"] = (
+                f"Cotejo automático texto↔referencias: hay citas SIN referencia "
+                f"({detalle}), por lo que este criterio no puede estar en el máximo. "
+                + (it.get("razon") or "")
+            )[:400]
+            ajustado = True
+    if ajustado:
+        calificacion["puntaje"] = sum(it["puntaje"] or 0 for it in calificacion["items"])
+        logger.info(f"[revision_completa] Cotejo aplicó tope a ítems 15/32 ({detalle}).")
+
+
+def _bloque_cotejo(cotejo: dict | None) -> str:
+    if not cotejo:
+        return ""
+    if cotejo["faltantes"]:
+        detalle = ", ".join(cotejo["faltantes"][:8])
+        extra = f" (y {len(cotejo['faltantes']) - 8} más)" if len(cotejo["faltantes"]) > 8 else ""
+        estado = (f"Se detectaron {len(cotejo['faltantes'])} citas SIN referencia "
+                  f"correspondiente: {detalle}{extra}.")
+    else:
+        estado = "Todas las citas del texto tienen una referencia con el mismo apellido."
+    return (
+        f"\n\n## COTEJO DE CITAS (verificación automática texto↔referencias — "
+        f"{cotejo['citas']} citas únicas detectadas)\n{estado}\n"
+        "Usa este cotejo como evidencia para los ítems de citas/referencias; no lo contradigas sin motivo."
+    )
+
+
 def _diagnosticar_unidad(llm, u: dict, rubrica: dict | None, enfoque: str, escala: int,
                          anclas: dict[int, list[str]] | None = None,
-                         coherencia: str = "") -> dict | None:
+                         coherencia: str = "", cotejo: dict | None = None) -> dict | None:
     """Califica los ÍTEMS de rúbrica mapeados a la unidad (1 llamada). None si no tiene ítems."""
     items = _items_de_unidad(u["unidad"], u["secciones_raw"], rubrica, anclas)
     if not items:
@@ -252,6 +376,9 @@ def _diagnosticar_unidad(llm, u: dict, rubrica: dict | None, enfoque: str, escal
 
     criterios = "\n".join(f"{it['numero']:02d}. {it.get('descripcion', '')}" for it in items)
     contenido = "\n\n".join(u["chunks"])[: _MAX_CHARS_VENTANA * 2]
+    # Ítems de verificación de citas → adjuntar el cotejo automático como evidencia.
+    if cotejo and any(it["numero"] in _ITEMS_VERIFICACION_CITAS for it in items):
+        contenido += _bloque_cotejo(cotejo)
     try:
         resp = llm.invoke([
             SystemMessage(content=_PROMPT_BARRIDO.format(
@@ -294,6 +421,105 @@ def _diagnosticar_unidad(llm, u: dict, rubrica: dict | None, enfoque: str, escal
         "eval":          eval_items,
         "fortalezas":    [f for f in (data.get("fortalezas") or []) if f][:3],
         "debilidades":   [d for d in (data.get("debilidades") or []) if d][:3],
+    }
+
+
+_PROMPT_RESCATE = """Eres un auditor académico de proyectos de tesis. Los siguientes criterios de la
+rúbrica NO se encontraron en las secciones donde normalmente se evalúan (puede que el contenido
+exista en otra parte del documento, con numeración rota o dentro de otra sección).
+
+Para cada criterio te doy los FRAGMENTOS más relevantes hallados buscando en TODO el documento.
+Califica cada criterio de 0 a {escala} SOLO con lo que los fragmentos realmente evidencien:
+- Si el fragmento evidencia el criterio, califícalo normalmente (sé estricto: máximo solo con
+  evidencia explícita) e indica en "razon" DÓNDE se encontró (nombre de la sección del fragmento).
+- Si los fragmentos NO tratan realmente el criterio, puntaje 0 y en "razon" di que no hay evidencia.
+- NO inventes contenido que no esté en los fragmentos.
+
+{enfoque}
+
+REGLA DE TIPO: si un criterio exige algo que el ENFOQUE NO requiere, ponle "aplica": false y
+explica en "razon" que por el tipo no es exigible.
+
+Responde SOLO con JSON válido:
+{{"items": [{{"numero": <int>, "puntaje": <0-{escala}>, "aplica": true, "razon": "dónde se halló y qué cumple/falta"}}]}}
+
+CRITERIOS Y FRAGMENTOS HALLADOS:
+{bloques}
+"""
+
+
+def _rescatar_items_ausentes(llm, doc, faltantes: list[dict], enfoque: str,
+                             escala: int) -> dict | None:
+    """Ítems sin unidad detectada → búsqueda semántica en TODO el documento + 1 llamada.
+
+    Evita falsos "ausentes" por numeración rota o contenido dentro de otra sección
+    (p. ej. la matriz de consistencia numerada «1.1.» dentro del capítulo 3, o la
+    financiación como «1.1.2.» dentro de aspectos administrativos). Devuelve un
+    pseudo-diagnóstico {"unidad": …, "eval": …} o None si no hubo evidencia.
+    """
+    bloques, con_evidencia = [], []
+    for it in faltantes:
+        try:
+            docs = doc.vector_store.similarity_search(it.get("descripcion", ""), k=3)
+        except Exception:
+            docs = []
+        fragmentos = []
+        for d in docs:
+            sec = (d.metadata or {}).get("seccion", "¿?")
+            txt = (d.page_content or "").strip()
+            if txt:
+                fragmentos.append(f"[{sec}] {txt[:900]}")
+        if not fragmentos or sum(len(f) for f in fragmentos) < 150:
+            continue
+        con_evidencia.append(it)
+        bloques.append(
+            f"CRITERIO {it['numero']:02d}. {it.get('descripcion', '')}\n"
+            + "\n".join(fragmentos[:3])
+        )
+    if not con_evidencia:
+        return None
+
+    try:
+        resp = llm.invoke([
+            SystemMessage(content=_PROMPT_RESCATE.format(
+                escala=escala, enfoque=enfoque, bloques="\n\n---\n\n".join(bloques)[:16000],
+            )),
+            HumanMessage(content="Califica los criterios solo con la evidencia hallada."),
+        ])
+        data = extraer_json(resp.content) or {}
+    except Exception as exc:
+        logger.warning(f"[revision_completa] Rescate de ítems falló: {exc}")
+        return None
+
+    nums_validos = {it["numero"] for it in con_evidencia}
+    eval_items: dict[int, dict] = {}
+    for r in (data.get("items") or []):
+        try:
+            num = int(r.get("numero"))
+        except (TypeError, ValueError):
+            continue
+        if num not in nums_validos:
+            continue
+        try:
+            p = max(0, min(int(escala), int(round(float(r.get("puntaje", 0))))))
+        except (TypeError, ValueError):
+            p = 0
+        razon = (r.get("razon") or "")[:300]
+        # Puntaje 0 sin evidencia real = sigue ausente (no lo forzamos a evaluado).
+        if p <= 0 and r.get("aplica", True):
+            continue
+        eval_items[num] = {"puntaje": p, "aplica": bool(r.get("aplica", True)), "razon": razon}
+
+    if not eval_items:
+        return None
+    logger.info(f"[revision_completa] Rescate: {sorted(eval_items)} hallados fuera de su sección esperada.")
+    return {
+        "unidad":        "Contenido hallado fuera de su sección esperada",
+        "secciones_raw": [],
+        "eval":          eval_items,
+        "fortalezas":    [],
+        "debilidades":   [],
+        "rescate":       True,   # pseudo-unidad: no sugerirla como sección a auditar
     }
 
 
@@ -364,7 +590,8 @@ def _recalificar(llm, items: list[dict], texto: str, enfoque: str, escala: int,
 
 
 def _consolidar_calificacion(diagnosticos: list[dict], items_all: list[dict],
-                             ausentes: list[dict], escala: int) -> dict:
+                             ausentes: list[dict], escala: int,
+                             tipo_etiqueta: str = "") -> dict:
     """Une las evaluaciones por unidad en una calificación por ítem (todos los ítems)."""
     por_item: dict[int, list[dict]] = {}
     secs_item: dict[int, list[str]] = {}
@@ -386,16 +613,32 @@ def _consolidar_calificacion(diagnosticos: list[dict], items_all: list[dict],
         if not evs:
             items_out.append({"numero": num, "descripcion": desc.get(num, ""), "secciones": [],
                               "puntaje": 0, "maximo": escala, "estado": "ausente",
-                              "razon": "Tu proyecto no incluye contenido para este criterio."})
+                              "razon": "No se halló contenido para este criterio en ninguna "
+                                       "sección del documento (se buscó también fuera de su "
+                                       "sección habitual)."})
             maximo += escala
             continue
         no_aplica = sum(1 for e in evs if not e.get("aplica", True)) >= (len(evs) + 1) // 2
         if no_aplica:
-            razon = next((e.get("razon") for e in evs if not e.get("aplica", True)), "")
+            # N/A por tipo → PUNTAJE MÁXIMO: la rúbrica UPAO exige elementos (p. ej.
+            # hipótesis) que ciertos tipos (cualitativa, tecnológica) no requieren. Al no
+            # poder exigírsele al estudiante, no se le penaliza: recibe el máximo. Si el
+            # proyecto SÍ incluye el elemento, los agentes califican su calidad normalmente
+            # (esa rama no llega aquí porque el evaluador lo marca como aplicable).
+            motivo = (next((e.get("razon") for e in evs if not e.get("aplica", True)), "") or "").strip()
+            tipo_txt = f" ({tipo_etiqueta})" if tipo_etiqueta else ""
+            razon = (
+                f"Criterio no exigible para tu tipo de investigación{tipo_txt}"
+                + (f": {motivo.rstrip('.')}." if motivo else ".")
+                + f" Como no se te puede exigir, se otorga el puntaje máximo ({escala}/{escala}) "
+                  "para no penalizarte frente a proyectos de otro tipo."
+            )
             items_out.append({"numero": num, "descripcion": desc.get(num, ""),
-                              "secciones": secs_item.get(num, []), "puntaje": None,
+                              "secciones": secs_item.get(num, []), "puntaje": escala,
                               "maximo": escala, "estado": "na", "razon": razon})
-            continue  # N/A por tipo: no cuenta al máximo
+            total += escala
+            maximo += escala
+            continue
         # Un ítem mapeado a VARIAS secciones se evalúa en cada una; donde su contenido
         # NO vive saca 0/bajo. Promediar (lo anterior) hundía la nota y, encima, se
         # mostraba la razón de OTRA sección → nota y texto se contradecían. Ahora se
@@ -753,13 +996,61 @@ def _titulo_rubrica_limpio(titulo: str) -> str:
     return t.replace("\\", "").strip(" .")
 
 
-def _calificar_por_tipo(doc, tipo: Optional[str], coherencia: str, cancelar: threading.Event):
+def _contenido_seccion_juez(titulo: str, secciones_chunks: dict[str, list[str]],
+                            tope: int = 9000) -> str:
+    """Contenido REAL del proyecto para una sección de la rúbrica del juez.
+
+    Empareja el título de la rúbrica («7. Marco teórico (antecedentes y base teórica)»)
+    con las secciones del TOC por palabras clave y arrastra también sus DESCENDIENTES
+    por prefijo numérico. Antes se usaba solo una consulta semántica, que dejaba al
+    juez "ciego" ante secciones existentes (antecedentes, limitaciones) → notas 0 injustas.
+    """
+    from backend.config import _kw_seccion, _prefijo_num
+
+    kw_t = _kw_seccion(titulo)
+    if not kw_t or not secciones_chunks:
+        return ""
+
+    puntuadas: list[tuple[float, str]] = []
+    for sec in secciones_chunks:
+        kw_s = _kw_seccion(sec)
+        if not kw_s:
+            continue
+        inter = len(kw_t & kw_s)
+        if inter:
+            puntuadas.append((inter / len(kw_t | kw_s), sec))
+    if not puntuadas:
+        return ""
+    puntuadas.sort(reverse=True)
+    mejor_j = puntuadas[0][0]
+    # Secciones con match razonable (≥ mitad del mejor, mínimo 0.2) + sus descendientes.
+    elegidas: list[str] = []
+    for j, sec in puntuadas:
+        if j >= max(0.2, mejor_j * 0.5) and sec not in elegidas:
+            elegidas.append(sec)
+            pref = _prefijo_num(sec)
+            if pref:
+                for hijo in secciones_chunks:
+                    if hijo not in elegidas and _prefijo_num(hijo).startswith(pref + "."):
+                        elegidas.append(hijo)
+
+    partes: list[str] = []
+    for sec in elegidas:
+        cuerpo = "\n".join(secciones_chunks.get(sec) or []).strip()
+        if cuerpo:
+            partes.append(f"### {sec}\n{cuerpo}")
+    return "\n\n".join(partes)[:tope]
+
+
+def _calificar_por_tipo(doc, tipo: Optional[str], coherencia: str, cancelar: threading.Event,
+                        secciones_chunks: Optional[dict[str, list[str]]] = None):
     """Generador: califica el proyecto con la rúbrica del TIPO vía LLM-as-judge (1 modelo).
 
     Itera las secciones de la rúbrica del tipo (cuanti→rubrica.md, cuali/mixto/tecnológico/
-    innovación→sus archivos), recupera el contenido por sección y lo califica con un solo
-    modelo (todos los ítems, escala ponderada /100). Va emitiendo progreso; el último evento
-    es {'tipo':'_cal', 'calificacion':..., 'por_seccion':...}.
+    innovación→sus archivos), arma el contenido con las secciones REALES del proyecto
+    (con fallback a consulta semántica) y lo califica con un solo modelo (todos los ítems,
+    escala ponderada). Va emitiendo progreso; el último evento es
+    {'tipo':'_cal', 'calificacion':..., 'por_seccion':...}.
     """
     import os
     from evaluator.metrics.llm_judge import (
@@ -770,6 +1061,7 @@ def _calificar_por_tipo(doc, tipo: Optional[str], coherencia: str, cancelar: thr
     rubrica_md = cargar_rubrica_metodologica(tipo)
     secciones = _parsear_secciones_rubrica(rubrica_md)
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    secciones_chunks = secciones_chunks or {}
 
     items_cal: list[dict] = []
     por_seccion: dict[str, dict] = {}
@@ -778,10 +1070,12 @@ def _calificar_por_tipo(doc, tipo: Optional[str], coherencia: str, cancelar: thr
             return
         titulo = _titulo_rubrica_limpio(titulo_raw)
         yield {"tipo": "progreso", "detalle": f"Métrica — «{titulo}»…"}
-        try:
-            cont = limpiar_marcas_rag(recuperar_contexto(doc.vector_store, titulo))
-        except Exception:
-            cont = ""
+        cont = _contenido_seccion_juez(titulo, secciones_chunks)
+        if not cont:
+            try:
+                cont = limpiar_marcas_rag(recuperar_contexto(doc.vector_store, titulo))
+            except Exception:
+                cont = ""
         texto = cont or "(sección sin contenido localizable en el proyecto)"
         # Para secciones del núcleo (relacionales) añade el esqueleto para juzgar la coherencia.
         if _es_nucleo(titulo) and coherencia:
@@ -883,6 +1177,7 @@ def ejecutar_revision_completa(
     unidades = _contenido_por_unidad_rubrica(doc)
     anclas = _anclas_por_item(rubrica) if (rubrica and rubrica.get("mapa_secciones")) else None
     coherencia = _digest_coherencia(unidades)
+    cotejo = _cotejo_citas(unidades)
     diagnosticos: list[dict] = []
     fortalezas: list[str] = []
     debilidades: list[str] = []
@@ -893,7 +1188,7 @@ def ejecutar_revision_completa(
         if sum(len(c) for c in u["chunks"]) < _MIN_CHARS_UNIDAD:
             continue
         yield {"tipo": "progreso", "detalle": f"Calificando «{u['unidad']}»…"}
-        diag = _diagnosticar_unidad(llm, u, rubrica, enfoque, ESCALA_MAX, anclas, coherencia)
+        diag = _diagnosticar_unidad(llm, u, rubrica, enfoque, ESCALA_MAX, anclas, coherencia, cotejo)
         if not diag:
             continue
         diagnosticos.append(diag)
@@ -910,14 +1205,29 @@ def ejecutar_revision_completa(
     if not diagnosticos:
         yield {"tipo": "error", "detalle": "No se pudo extraer contenido evaluable del documento."}
         return
-    calificacion = _consolidar_calificacion(diagnosticos, items_all, ausentes, ESCALA_MAX)
 
-    # ── FASE 2: Métrica complementaria — rúbrica del TIPO (LLM-as-judge, /100) ──
+    # RESCATE: ítems sin unidad detectada → búsqueda en TODO el documento antes de
+    # marcarlos ausentes (numeración rota, contenido dentro de otra sección, etc.).
+    evaluados = {num for d in diagnosticos for num in (d.get("eval") or {})}
+    faltantes = [it for it in items_all if it["numero"] not in evaluados]
+    if faltantes and not cancelar.is_set():
+        yield {"tipo": "progreso",
+               "detalle": f"Buscando en todo el documento {len(faltantes)} criterio(s) no hallados…"}
+        diag_rescate = _rescatar_items_ausentes(llm, doc, faltantes, enfoque, ESCALA_MAX)
+        if diag_rescate:
+            diagnosticos.append(diag_rescate)
+
+    calificacion = _consolidar_calificacion(diagnosticos, items_all, ausentes, ESCALA_MAX,
+                                            tipo_etiqueta=etiqueta_tipo)
+    _aplicar_cotejo_a_calificacion(calificacion, cotejo, ESCALA_MAX)
+
+    # ── FASE 2: Métrica complementaria — rúbrica del TIPO (LLM-as-judge) ──
     yield {"tipo": "fase", "fase": "metricas",
            "detalle": f"Fase 2/4 — Métrica LLM-as-judge (rúbrica {etiqueta_tipo})…"}
     metricas: Optional[dict] = None
     cal_juez: Optional[dict] = None
-    for ev in _calificar_por_tipo(doc, tipo_inv, coherencia, cancelar):
+    secciones_chunks = _chunks_por_seccion(doc)
+    for ev in _calificar_por_tipo(doc, tipo_inv, coherencia, cancelar, secciones_chunks):
         if ev["tipo"] == "_cal":
             cal_juez = ev["calificacion"]
         else:
@@ -952,8 +1262,8 @@ def ejecutar_revision_completa(
         nums_nucleo = _items_nucleo(items_all, rubrica, llm)
         eval_items, npts, nmax = [], 0.0, 0.0
         for it in calificacion["items"]:
-            if it["estado"] == "na":
-                continue
+            # Los N/A por tipo ya llevan el puntaje máximo (no penalizan): entran a la
+            # tabla del núcleo con su razón, pero al estar en el máximo no se reescriben.
             if it["numero"] in nums_nucleo:
                 eval_items.append({"item_numero": it["numero"], "criterio": it["descripcion"],
                                    "puntaje": it["puntaje"], "maximo": it["maximo"],
@@ -1056,14 +1366,16 @@ def ejecutar_revision_completa(
     # Secciones débiles FUERA del núcleo → sugerir auditarlas aparte.
     sugeridas = [
         d["unidad"] for d in sorted(diagnosticos, key=_prom_unidad)
-        if not _es_nucleo(d["unidad"]) and _prom_unidad(d) < ESCALA_MAX * 0.6
+        if not _es_nucleo(d["unidad"]) and not d.get("rescate")
+        and _prom_unidad(d) < ESCALA_MAX * 0.6
     ][:4]
 
     yield {"tipo": "fase", "fase": "sintesis", "detalle": "Fase 4/4 — Sintetizando informe global…"}
 
     diag_txt = "\n".join(
         f"- {it['descripcion']}: {it['puntaje']}/{it['maximo']}" if it["estado"] != "na"
-        else f"- {it['descripcion']}: N/A (por tipo)"
+        else f"- {it['descripcion']}: {it['puntaje']}/{it['maximo']} "
+             "(no exigible por el tipo de investigación — máximo otorgado, no requiere acción)"
         for it in calificacion["items"]
     )
     try:
@@ -1132,7 +1444,7 @@ def ejecutar_revision_completa(
         f"{d['unidad']} "
         f"{round(_prom_unidad(d) * len([e for e in d['eval'].values() if e.get('aplica', True)]), 1)}"
         f"/{len([e for e in d['eval'].values() if e.get('aplica', True)]) * ESCALA_MAX}"
-        for d in diagnosticos
+        for d in diagnosticos if not d.get("rescate")
     )
     resumen_chat = {
         "tipo": "completa",

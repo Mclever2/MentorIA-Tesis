@@ -14,10 +14,11 @@ import { cn } from "@/lib/utils";
 import type { RevisionCompleta, RubricaItemEval } from "@/types";
 
 const ESTADO = {
-  ok:      { icon: CheckCircle2,  color: "text-[#34C759]",        label: "Cumple" },
-  bajo:    { icon: AlertTriangle, color: "text-[#FF9500]",        label: "Mejorable" },
-  na:      { icon: MinusCircle,   color: "text-muted-foreground", label: "No aplica (tipo)" },
-  ausente: { icon: XCircle,       color: "text-destructive",      label: "Ausente" },
+  ok:      { icon: CheckCircle2,  color: "text-[#34C759]", label: "Cumple" },
+  bajo:    { icon: AlertTriangle, color: "text-[#FF9500]", label: "Mejorable" },
+  // No exigible por el tipo de investigación → recibe el puntaje máximo (no penaliza).
+  na:      { icon: MinusCircle,   color: "text-[#34C759]", label: "No exigible (máx. otorgado)" },
+  ausente: { icon: XCircle,       color: "text-destructive", label: "Ausente" },
 } as const;
 
 function Fila({ it }: { it: RubricaItemEval }) {

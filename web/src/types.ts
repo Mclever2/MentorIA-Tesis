@@ -59,7 +59,8 @@ export interface RubricaItemEval {
   numero: number | string;
   descripcion: string;
   secciones?: string[];
-  puntaje: number | null;          // null = no aplica por tipo
+  // "na" (no exigible por tipo) ahora recibe el puntaje MÁXIMO; null solo en datos antiguos.
+  puntaje: number | null;
   maximo: number;
   estado: "ok" | "bajo" | "na" | "ausente";
   razon?: string;

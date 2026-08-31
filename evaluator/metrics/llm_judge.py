@@ -89,6 +89,15 @@ REGLAS DE CALIFICACIÓN POR ÍTEM:
   * puntaje_maximo: suma de todos los pts_max.
   * puntaje_total: suma de todos los pts_obtenido.
 
+CALIBRACIÓN — sé riguroso, NO complaciente (esto es una auditoría, no un estímulo):
+- pts_max SOLO con evidencia textual EXPLÍCITA y desarrollada del criterio; en "razon" CITA esa
+  evidencia (frase o dato concreto del texto). Si no puedes citarla, no es pts_max.
+- Evidencia parcial, genérica, solo enunciada o sin desarrollo → 50%.
+- Sin evidencia en el texto → 0. NO premies promesas ("se hará...", "se considerará...") salvo
+  que el ítem evalúe explícitamente la planificación, ni supongas contenido que no está.
+- Que la sección exista NO vale puntos por sí mismo: evalúa su CALIDAD contra el criterio.
+- Ante la duda entre dos niveles, asigna el MENOR y explica qué faltó para el superior.
+
 Responde en formato estructurado de JSON.
 """
 
