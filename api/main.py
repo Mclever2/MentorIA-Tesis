@@ -202,17 +202,21 @@ def rubrica_oficial(doc_id: str = "", user: dict = Depends(usuario_actual)):
         ESCALA_MAX,
         RUBRICA_GRUPOS_UPAO,
         RUBRICA_ITEMS_UPAO,
-        _buscar_items_seccion,
+        SECCION_ITEMS_MAP,
+        resolver_unidad_toc,
     )
 
     mapa_secciones: dict[str, list[int]] | None = None
     doc = registry.obtener_documento(doc_id) if doc_id else None
     if doc is not None and doc.user_id == user.get("sub", "anon") and doc.estructura_toc:
-        # Ítems por sección real del TOC; los encabezados de capítulo se omiten
-        # cuando el ítem ya tiene una subsección específica (evita duplicados).
+        # Ítems por sección real del TOC, con el MISMO resolver que usa la evaluación
+        # (TOC-consciente: subsecciones con match débil heredan la unidad del padre).
+        # Los encabezados de capítulo se omiten cuando el ítem ya tiene subsección.
+        toc = list(doc.estructura_toc)
         por_item: dict[int, list[str]] = {}
-        for sec in doc.estructura_toc:
-            for n in _buscar_items_seccion(sec):
+        for sec in toc:
+            unidad = resolver_unidad_toc(sec, toc)
+            for n in SECCION_ITEMS_MAP.get(unidad or "", []):
                 por_item.setdefault(n, []).append(sec)
         mapa_secciones = {}
         for n, secs in por_item.items():

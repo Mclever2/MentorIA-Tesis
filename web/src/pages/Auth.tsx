@@ -25,12 +25,19 @@ export default function Auth() {
     setCargando(true);
     try {
       if (modo === "registro") {
-        const { data, error } = await supabase.auth.signUp({ email, password });
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          // Tras confirmar el correo, Supabase redirige AQUÍ (pantalla de bienvenida
+          // propia) en vez de a la Site URL. La URL debe estar en la allowlist de
+          // Supabase → Authentication → URL Configuration → Redirect URLs.
+          options: { emailRedirectTo: `${window.location.origin}/bienvenida` },
+        });
         if (error) throw error;
         if (data.session) {
           navigate("/app");
         } else {
-          setAviso("Revisa tu correo para confirmar la cuenta y luego inicia sesión.");
+          setAviso("Te enviamos un correo de MentorIA: ábrelo y pulsa «Confirmar mi correo» para activar tu cuenta.");
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });

@@ -378,11 +378,24 @@ Tu tarea principal ahora es VERIFICAR SI ESTOS ERRORES FUERON CORREGIDOS en el n
         for num in sorted(conteo_items.keys()):
             grupo = conteo_items[num]
             # N/A si la MAYORÍA de subagentes lo marcó como no aplicable al tipo.
+            # → PUNTAJE MÁXIMO: si el tipo de investigación no exige el elemento
+            # (p. ej. hipótesis en cualitativa), no se le puede exigir al estudiante,
+            # así que no se le penaliza: recibe el máximo del ítem. Si el proyecto SÍ
+            # tiene el elemento, los subagentes lo marcan aplicable y se califica normal.
             no_aplica = sum(1 for g in grupo if not g["aplica"]) >= (len(grupo) + 1) // 2
             if no_aplica:
                 obs_na = next((g["observacion"] for g in grupo if not g["aplica"]),
                               grupo[0]["observacion"])
                 items_na_tipo.append({"item_numero": num, "observacion": obs_na})
+                items_consolidados.append({
+                    "item_numero": num,
+                    "puntaje": escala_max,
+                    "observacion": (
+                        "No exigible para tu tipo de investigación"
+                        + (f": {(obs_na or '').strip().rstrip('.')}." if obs_na else ".")
+                        + f" Se otorga el máximo ({escala_max}/{escala_max}) para no penalizarte."
+                    ),
+                })
                 continue
 
             puntajes = [g["puntaje"] for g in grupo]
@@ -404,8 +417,9 @@ Tu tarea principal ahora es VERIFICAR SI ESTOS ERRORES FUERON CORREGIDOS en el n
 
         puntaje_total_consolidado = sum(it["puntaje"] for it in items_consolidados) if items_consolidados else consolidado["score_final"]
 
-        # El máximo NO incluye los ítems N/A por tipo (ni penalizan ni inflan).
-        puntaje_max_efectivo = max(escala_max, puntaje_max - len(na_nums) * escala_max)
+        # Los ítems N/A por tipo YA cuentan con el puntaje máximo (no penalizan),
+        # así que el máximo de la sección se mantiene completo.
+        puntaje_max_efectivo = puntaje_max
 
         # Invariante: una sección nunca puede puntuar por encima de su máximo. Pasa
         # cuando el LLM califica más ítems que los de la rúbrica (p. ej. el núcleo

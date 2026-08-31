@@ -16,6 +16,7 @@ Nota: la EVALUACIÓN contra la rúbrica la realiza el nodo Auditor, no el redact
 
 import logging
 import os
+import re
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -72,6 +73,14 @@ REGLAS PARA `texto_redactado`:
 - Si el estudiante TIENE algo que NO corresponde a su enfoque (p. ej. hipótesis estadísticas en
   un estudio cualitativo, hipótesis en un objetivo específico que no las requiere), NO lo borres
   ni lo "arregles" a la fuerza dentro del texto: déjalo y explica el problema en `recomendaciones`.
+- FIDELIDAD FACTUAL (obligatoria): NO cambies ni inventes datos del proyecto: cifras, años,
+  tamaños de muestra/población, fórmulas, ESCALAS de medición ni instrumentos declarados
+  (si el instrumento es la «rúbrica oficial del curso», NO lo conviertas en «Likert» ni en
+  «puntajes del 1 al 5»; si la escala es 0-3, sigue siendo 0-3). Si necesitas un dato que no
+  está en el original ni en el contexto, usa `[COMPLETAR: …]` en vez de inventarlo.
+- NO ELIMINES contenido correcto al reescribir: conserva TODAS las dimensiones, indicadores,
+  ítems y CITAS (Autor, año) del texto original. Puedes reordenarlos, precisarlos o corregirlos,
+  nunca omitirlos; si crees que algo sobra, dilo en `recomendaciones`, no lo borres.
 - Usa el contexto RAG para corregir vacíos REALES señalados por el panel (antecedentes, datos,
   referencias de otras secciones del proyecto). Si falta un dato, usa marcadores como
   `[INSERTAR DATO ESTADÍSTICO ACÁ]` o redacta de forma cualitativa con base en la realidad del proyecto.
@@ -367,6 +376,15 @@ def make_nodo_redactor(llm: ChatOpenAI):
                 )
                 logger.info(f"[Redactor] Título UPAO con {n_pal} palabras (>20) — aviso añadido")
 
+        # Verificación de fidelidad (sin LLM): citas perdidas y escalas/instrumentos
+        # inventados respecto al texto que se le dio a mejorar.
+        aviso_fid = _verificar_fidelidad(texto_base, texto_final)
+        if aviso_fid:
+            sugerencias_escritor = (
+                f"{sugerencias_escritor}\n\n{aviso_fid}" if sugerencias_escritor else aviso_fid
+            )
+            logger.info("[Redactor] Verificación de fidelidad con observaciones — aviso añadido")
+
         notas_na = _notas_na_tipo(state)
         if notas_na:
             sugerencias_escritor = (
@@ -476,22 +494,85 @@ def _instruccion_nucleo(plan: dict | None) -> str:
 
 def _notas_na_tipo(state: MentoriaState) -> str:
     """Mensaje DUAL para ítems que el tipo no exige pero la rúbrica sí califica:
-    no son errores (por el tipo), pero el jurado los evalúa → tenerlos en cuenta."""
+    no son errores (por el tipo) y el sistema les otorga el puntaje MÁXIMO."""
     na = state.get("items_na_tipo") or []
     if not na:
         return ""
     lineas = [
-        "**Criterios que tu rúbrica exige pero tu tipo de investigación no requiere** "
-        "(no son errores; el sistema no los penalizó, pero el jurado los califica con esta rúbrica):"
+        "**Criterios que la rúbrica UPAO califica pero tu tipo de investigación no requiere** "
+        "(recibieron el puntaje máximo: al no poder exigírsete, no se te penaliza):"
     ]
     for it in na:
         n   = it.get("item_numero", "?")
         obs = (it.get("observacion") or "").strip()
         lineas.append(
-            f"- Ítem {n}: por tu tipo/diseño de investigación no es exigible (no penaliza). "
-            f"Aun así tu rúbrica lo evalúa; considéralo o justifica su ausencia ante el jurado. {obs}"
+            f"- Ítem {n}: no exigible por tu tipo/diseño → máximo otorgado. "
+            f"Aun así, prepárate para justificar su ausencia ante el jurado. {obs}"
         )
     return "\n".join(lineas)
+
+
+# ── Verificación determinística de fidelidad del texto mejorado ────────────────
+_RE_CITA_KEY = re.compile(
+    r"\(\s*([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-]+)[^()]{0,80}?,\s*((?:19|20)\d{2})[a-z]?\s*\)"
+)
+_RE_ESCALA_SOSPECHOSA = re.compile(
+    r"(likert(?:\s+de\s+\d+\s+puntos?)?|puntajes?\s+del?\s+\d+\s+al?\s+\d+|"
+    r"escala\s+(?:de\s+)?\d+\s*(?:a|al|-|–)\s*\d+)",
+    re.IGNORECASE,
+)
+
+
+def _norm_ascii(t: str) -> str:
+    import unicodedata
+    return unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode("ascii").lower()
+
+
+def _verificar_fidelidad(texto_original: str, texto_mejorado: str) -> str:
+    """Compara el texto mejorado contra el original y reporta desvíos factuales.
+
+    Sin LLM (regex): (1) citas (Autor, año) del original que la reescritura perdió;
+    (2) menciones de escalas/instrumentos («Likert de 5», «puntajes del 1 al 5»)
+    que NO existen en el original — el caso real fue inventar una escala 1-5 cuando
+    el instrumento oficial es la rúbrica 0-3. Devuelve un aviso markdown o ''.
+    """
+    if not (texto_original or "").strip() or not (texto_mejorado or "").strip():
+        return ""
+    avisos: list[str] = []
+
+    mejorado_norm = _norm_ascii(texto_mejorado)
+    perdidas = []
+    for m in _RE_CITA_KEY.finditer(texto_original):
+        apellido, anio = m.group(1), m.group(2)
+        if _norm_ascii(apellido) not in mejorado_norm:
+            clave = f"{apellido} ({anio})"
+            if clave not in perdidas:
+                perdidas.append(clave)
+    if perdidas:
+        avisos.append(
+            "la reescritura perdió estas citas del original: "
+            + ", ".join(perdidas[:6])
+            + (" …" if len(perdidas) > 6 else "")
+            + ". Restitúyelas o verifica que su contenido siga respaldado."
+        )
+
+    original_norm = _norm_ascii(texto_original)
+    nuevas_escalas = []
+    for m in _RE_ESCALA_SOSPECHOSA.finditer(texto_mejorado):
+        frase = m.group(0).strip()
+        if _norm_ascii(frase) not in original_norm and frase not in nuevas_escalas:
+            nuevas_escalas.append(frase)
+    if nuevas_escalas:
+        avisos.append(
+            "menciona escalas/instrumentos que NO están en tu texto original: "
+            + "; ".join(f"«{f}»" for f in nuevas_escalas[:4])
+            + ". Verifica que correspondan a tu instrumento real (p. ej. la rúbrica oficial 0-3) "
+              "antes de adoptar la reescritura."
+        )
+
+    if not avisos:
+        return ""
+    return "⚠️ **Verificación de fidelidad del texto mejorado:** " + " Además, ".join(avisos)
 
 
 def _formatear_errores(errores: list) -> str:

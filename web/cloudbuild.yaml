@@ -21,6 +21,6 @@ images:
   - gcr.io/$PROJECT_ID/mentoria
 substitutions:
   #    Copia la URL que devuelve `gcloud run deploy mentoria-back` y pégala aquí.
-  _VITE_API_URL: 'https://mentoria-back-94300126756.us-central1.run.app'
+  _VITE_API_URL: 'https://mentoria-back-992830166095.us-central1.run.app'
   _VITE_SUPABASE_URL: 'https://jyhqwjxqwypxqlgvhdxr.supabase.co'
   _VITE_SUPABASE_ANON_KEY: 'sb_publishable_oOBKJU-HamAT2SMxXijdXg_r82t9pMc'
