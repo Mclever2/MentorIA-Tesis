@@ -52,6 +52,12 @@ su texto: (a) mejora RÁPIDA — la doy yo al instante, ágil para avanzar; y (b
 la red de agentes revisa y califica con su rúbrica, más rigurosa pero toma más tiempo y usa más expertos. \
 Que elija según lo que necesite.
 9. Responde en español, claro y conciso, en markdown. Sé cálido pero directo.
+10. El MARCO INSTITUCIONAL de abajo son hechos duros de la UPAO (estructura oficial del proyecto, \
+reglas del título, línea y sublíneas de investigación, tipos de investigación). Úsalos para responder \
+con precisión y NO los contradigas ni los inventes. Si el estudiante pregunta por la línea o las \
+sublíneas, explícale las diferencias con esos alcances.
+
+{marco_upao}
 
 ESTADO DEL PROYECTO DEL ESTUDIANTE:
 {estado}
@@ -161,8 +167,14 @@ def responder_consulta(
     historial: list[dict],
     doc,
     biblioteca,
+    ficha: dict | None = None,
 ) -> str:
-    """Genera la respuesta conversacional fundamentada en libros + tesis + hilo."""
+    """Genera la respuesta conversacional fundamentada en libros + tesis + hilo.
+
+    `ficha` es la memoria estructurada de la asesoría (ver `api/ficha.py`). Va en
+    el bloque de ESTADO porque es, literalmente, lo que se sabe del proyecto — y
+    en un estudiante sin PDF es lo ÚNICO que se sabe.
+    """
     libros, fuente_ej = _recuperar_libros(biblioteca, mensaje)
     tesis = _recuperar_tesis(doc, mensaje)
 
@@ -176,6 +188,15 @@ def responder_consulta(
             logger.warning(f"[conversador] No se pudieron resolver criterios de rúbrica: {exc}")
 
     estado = _estado_proyecto(doc)
+
+    from .ficha import bloque_ficha
+
+    estado += (
+        "\n\n- LO QUE EL ESTUDIANTE YA TE DECLARÓ EN ESTA ASESORÍA (dalo por sabido; "
+        "volver a preguntárselo es el error que más lo frustra):\n"
+        + bloque_ficha(ficha)
+    )
+
     if doc is not None:
         try:
             from .tipo_investigacion import obtener_tipo_diseno
@@ -185,7 +206,10 @@ def responder_consulta(
         except Exception as exc:
             logger.warning(f"[conversador] No se pudo detectar el tipo: {exc}")
 
+    from backend.upao_tesis import bloque_marco_upao
+
     sistema = _PROMPT_SISTEMA.format(
+        marco_upao=bloque_marco_upao(),
         estado=estado,
         libros=libros or "(sin fragmentos de libros recuperados para esta consulta)",
         tesis=tesis or "(sin fragmentos de la tesis — o el proyecto no está cargado)",

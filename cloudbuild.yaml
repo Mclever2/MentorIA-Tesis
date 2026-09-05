@@ -1,0 +1,32 @@
+# Build del BACKEND con CACHÉ de capas (BuildKit + inline cache).
+# Reusa las capas pesadas (apt, torch, pip install, modelo HF) de la imagen
+# anterior, así un rebuild de SOLO-CÓDIGO dura ~1 min en vez de ~6.
+# Los libros (chroma_db/biblioteca/) se hornean igual, ya indexados.
+#
+# Clave: DOCKER_BUILDKIT=1 + --build-arg BUILDKIT_INLINE_CACHE=1 hornean los
+# metadatos de caché DENTRO de la imagen, para que --cache-from del PRÓXIMO
+# build sí pueda reusar la capa del `COPY requirements.txt` y el pip install.
+#
+# Uso (desde la raíz):
+#   gcloud builds submit . --config cloudbuild.yaml
+steps:
+  # 1) Trae la imagen previa (si existe) para poder reusar sus capas.
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args: ['-c', 'docker pull gcr.io/$PROJECT_ID/mentoria-back:latest || exit 0']
+  # 2) Build con BuildKit, reusando capas y horneando inline cache.
+  - name: gcr.io/cloud-builders/docker
+    env:
+      - 'DOCKER_BUILDKIT=1'
+    args:
+      - build
+      - -t
+      - gcr.io/$PROJECT_ID/mentoria-back:latest
+      - --cache-from
+      - gcr.io/$PROJECT_ID/mentoria-back:latest
+      - --build-arg
+      - BUILDKIT_INLINE_CACHE=1
+      - .
+images:
+  - gcr.io/$PROJECT_ID/mentoria-back:latest
+timeout: 1800s
