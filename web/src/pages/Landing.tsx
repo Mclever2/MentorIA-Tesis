@@ -298,7 +298,7 @@ export default function Landing({ autenticado }: { autenticado: boolean }) {
           </h2>
           <Button size="lg" className="mt-7 rounded-full px-8 text-base shadow-lg shadow-primary/25" asChild>
             <Link to={destino}>
-              Crear cuenta gratis
+              {autenticado ? "Ir al chat" : "Iniciar sesión"}
               <ArrowRight className="w-4 h-4 ml-2" />
             </Link>
           </Button>

@@ -1203,7 +1203,27 @@ def ejecutar_revision_completa(
         yield {"tipo": "diagnostico", "capitulo": diag["unidad"],
                "puntaje": prom, "debilidades": diag["debilidades"]}
     if not diagnosticos:
-        yield {"tipo": "error", "detalle": "No se pudo extraer contenido evaluable del documento."}
+        # Un callejón sin salida («no se pudo extraer contenido evaluable») no le dice
+        # al estudiante qué pasó ni qué hacer. El caso real más común es haber subido
+        # un PDF que no es el proyecto de tesis, así que se le devuelve lo que SÍ se
+        # detectó para que lo vea por sí mismo.
+        halladas = [u["unidad"] for u in unidades][:6]
+        if halladas:
+            detalle = (
+                "No pude evaluar este documento: detecté las secciones "
+                + ", ".join(f"«{h}»" for h in halladas)
+                + ", pero ninguna tiene texto suficiente para calificarla contra la rúbrica. "
+                "Suele pasar cuando el PDF no es el proyecto de tesis (por ejemplo, otro "
+                "informe), cuando es un índice o un borrador casi vacío, o cuando es un "
+                "escaneo sin texto seleccionable. Revisa que sea el archivo correcto."
+            )
+        else:
+            detalle = (
+                "No pude evaluar este documento: no encontré ninguna sección del proyecto "
+                "de tesis en él. Comprueba que subiste el PDF correcto y que no es un "
+                "escaneo de imágenes sin texto seleccionable."
+            )
+        yield {"tipo": "error", "detalle": detalle}
         return
 
     # RESCATE: ítems sin unidad detectada → búsqueda en TODO el documento antes de

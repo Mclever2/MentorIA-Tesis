@@ -6,6 +6,7 @@ import { supabase, supabaseHabilitado } from "@/lib/supabase";
 import Landing from "@/pages/Landing";
 import Auth from "@/pages/Auth";
 import Bienvenida from "@/pages/Bienvenida";
+import Recuperar from "@/pages/Recuperar";
 import Chat from "@/pages/Chat";
 
 export default function App() {
@@ -45,6 +46,9 @@ export default function App() {
       {/* Destino del enlace de confirmación de correo (emailRedirectTo).
           Accesible con o sin sesión: Supabase valida y aquí solo damos la bienvenida. */}
       <Route path="/bienvenida" element={<Bienvenida />} />
+      {/* Destino del enlace de recuperación de contraseña. Accesible con o sin
+          sesión: Supabase crea una sesión temporal y aquí se define la nueva clave. */}
+      <Route path="/recuperar" element={<Recuperar />} />
       <Route
         path="/app"
         element={autenticado ? <Chat session={session} /> : <Navigate to="/auth" replace />}
