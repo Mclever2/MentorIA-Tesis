@@ -18,7 +18,7 @@ toc = {"1.2 Objetivos": 1, "2.1 Marco teorico": 2}
 vs = construir_vector_store(paginas, toc, emb, collection_name="test_memoria")
 
 doc = registry.registrar_documento(
-    user_id="dev-local", nombre="test.pdf", pdf_hash="x1",
+    user_id="dev-local", nombre="test.pdf", contenido_hash="x1",
     vector_store=vs, estructura_toc=toc,
     stats=[{"seccion": "1.2 Objetivos", "pagina_inicio": 1, "chars": 100, "n_fragmentos": 2},
            {"seccion": "2.1 Marco teorico", "pagina_inicio": 2, "chars": 100, "n_fragmentos": 2}],
@@ -31,7 +31,8 @@ assert "1.2 Objetivos" in doc.evaluadas
 assert mejoras.pendientes(doc) == ["1.2 Objetivos"]
 print("OK 1 - registrar_resultado: seccion marcada como evaluada con mejora pendiente")
 
-def fake_intent(mensaje, toc_nombres, contexto_previo="", hay_documento=False):
+def fake_intent(mensaje, toc_nombres, contexto_previo="", hay_documento=False,
+                historial=None, vector_store=None):
     if "objetivos" in mensaje.lower():
         return {"modo": "secciones", "secciones": ["1.2 Objetivos"], "respuesta": ""}
     return {"modo": "secciones", "secciones": ["2.1 Marco teorico"], "respuesta": ""}

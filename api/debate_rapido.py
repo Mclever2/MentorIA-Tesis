@@ -56,6 +56,7 @@ class EstadoDebate(TypedDict, total=False):
     seccion: str
     enfoque: str
     estado_proyecto: str
+    reglas_verificadas: str
     # debate (memoria compartida)
     debate_memory: list
     # salida
@@ -114,6 +115,9 @@ falta solo porque no aparece en el primer fragmento):
 CRITERIOS DE LA RÚBRICA A SATISFACER:
 {criterios_rubrica}
 
+REGLAS DURAS Y MEDICIONES VERIFICADAS (dalas por ciertas; no las recalcules):
+{reglas_verificadas}
+
 FRAGMENTOS DE LIBROS:
 {contexto_libros}
 
@@ -137,6 +141,9 @@ TEXTO ACTUAL DEL ESTUDIANTE:
 
 CRITERIOS DE LA RÚBRICA A SATISFACER:
 {criterios_rubrica}
+
+REGLAS DURAS Y MEDICIONES VERIFICADAS (dalas por ciertas; no las recalcules):
+{reglas_verificadas}
 
 FRAGMENTOS DE LIBROS:
 {contexto_libros}
@@ -163,6 +170,9 @@ TEXTO ORIGINAL DEL ESTUDIANTE:
 
 CRITERIOS DE LA RÚBRICA:
 {criterios_rubrica}
+
+REGLAS DURAS Y MEDICIONES VERIFICADAS (dalas por ciertas; no las recalcules):
+{reglas_verificadas}
 
 DEBATE COMPLETO DE LOS METODÓLOGOS:
 {historial_panel}
@@ -229,6 +239,9 @@ MATERIAL DEL ANÁLISIS INTERNO:
 - CRITERIOS DE LA RÚBRICA RELEVANTES:
 {criterios_rubrica}
 
+- REGLAS DURAS Y MEDICIONES VERIFICADAS:
+{reglas_verificadas}
+
 - SÍNTESIS DEL ANÁLISIS:
 {historial_panel}
 """
@@ -281,6 +294,19 @@ def _nodo_recuperacion(state: EstadoDebate) -> dict:
         except Exception as exc:
             logger.warning(f"[debate_rapido] No se pudo detectar el tipo: {exc}")
 
+        # El alcance viaja junto al enfoque porque comparten sitio en los tres
+        # prompts del debate: así el mini-grafo tampoco reclama capítulos que el
+        # estudiante todavía no ha declarado como terminados.
+        try:
+            from backend.alcance import bloque_prompt
+            bloque = bloque_prompt(doc)
+            if bloque:
+                enfoque = "\n\n".join(p for p in (enfoque, bloque) if p)
+        except Exception as exc:                               # noqa: BLE001
+            logger.warning(f"[debate_rapido] No se pudo aplicar el alcance: {exc}")
+
+    reglas = _reglas_verificadas(seccion or "", tesis, doc)
+
     logger.info(
         f"[debate_rapido] Recuperación lista | sección: {seccion or '—'} | "
         f"rúbrica: {'sí' if criterios else 'no'} | tesis: {len(tesis)} chars"
@@ -292,8 +318,45 @@ def _nodo_recuperacion(state: EstadoDebate) -> dict:
         "seccion": seccion or "",
         "enfoque": enfoque,
         "estado_proyecto": estado,
+        "reglas_verificadas": reglas,
         "debate_memory": [],
     }
+
+
+def _reglas_verificadas(seccion: str, texto: str, doc) -> str:
+    """Reglas duras + mediciones que el panel no debe estimar a ojo.
+
+    Siempre entra la vigencia de las fuentes (aplica a cualquier sección que cite).
+    Si la sección es el título, entra además su política de delimitación y el
+    conteo real de palabras: es lo que se le escapaba al panel genérico, que trataba
+    el título como un párrafo más.
+    """
+    from backend.citas import analizar_vigencia, bloque_regla_citas
+
+    partes: list[str] = []
+    s = (seccion or "").lower()
+
+    if "título" in s or "titulo" in s:
+        from backend.titulo import bloque_regla_titulo
+        tipo, diseno = "cuantitativa", ""
+        universidad = ""
+        if doc is not None:
+            universidad = getattr(doc, "universidad", "") or ""
+            try:
+                from .tipo_investigacion import obtener_tipo_diseno
+                tipo, diseno = obtener_tipo_diseno(doc)
+            except Exception as exc:                      # noqa: BLE001
+                logger.warning(f"[debate_rapido] No se pudo detectar el tipo: {exc}")
+        partes.append(bloque_regla_titulo(
+            tipo_investigacion=tipo,
+            diseno=diseno,
+            contexto_proyecto=texto,
+            universidad=universidad,
+            titulo_actual=texto,
+        ))
+
+    partes.append(bloque_regla_citas(diagnostico=analizar_vigencia(texto)))
+    return "\n\n".join(partes)
 
 
 def _nodo_rigor(state: EstadoDebate) -> dict:
@@ -316,6 +379,7 @@ def _nodo_rigor(state: EstadoDebate) -> dict:
         "consulta": state.get("consulta", ""),
         "contexto_tesis": state.get("contexto_tesis", ""),
         "criterios_rubrica": state.get("criterios_rubrica", ""),
+        "reglas_verificadas": state.get("reglas_verificadas", ""),
         "contexto_libros": state.get("contexto_libros", ""),
     }
     memoria = list(state.get("debate_memory") or [])
@@ -340,6 +404,7 @@ def _nodo_coherencia(state: EstadoDebate) -> dict:
         "consulta": state.get("consulta", ""),
         "contexto_tesis": state.get("contexto_tesis", ""),
         "criterios_rubrica": state.get("criterios_rubrica", ""),
+        "reglas_verificadas": state.get("reglas_verificadas", ""),
         "contexto_libros": state.get("contexto_libros", ""),
         "historial_panel": _formatear_memoria(memoria),
     }
@@ -363,6 +428,7 @@ def _nodo_sintetizador(state: EstadoDebate) -> dict:
         "consulta": state.get("consulta", ""),
         "contexto_tesis": state.get("contexto_tesis", ""),
         "criterios_rubrica": state.get("criterios_rubrica", ""),
+        "reglas_verificadas": state.get("reglas_verificadas", ""),
         "historial_panel": _formatear_memoria(state.get("debate_memory") or []),
     }
     try:
@@ -382,6 +448,7 @@ def _nodo_estructurador(state: EstadoDebate) -> dict:
         texto_sintetizado=state.get("texto_sintetizado") or "(no se reescribió texto)",
         recomendaciones=state.get("recomendaciones") or "(sin recomendaciones)",
         criterios_rubrica=state.get("criterios_rubrica", ""),
+        reglas_verificadas=state.get("reglas_verificadas", ""),
         historial_panel=_formatear_memoria(state.get("debate_memory") or []),
     )
     mensajes = [SystemMessage(content=sistema)]

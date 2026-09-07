@@ -16,7 +16,7 @@ export default function RecursosPanel(props: Props) {
   return (
     <div className="px-4 pb-3 space-y-3">
       {/* ── Rúbrica oficial UPAO ─────────────────────────────── */}
-      <div className="glass rounded-2xl p-3.5">
+      <div className="glass-scroll rounded-2xl p-3.5">
         <div className="flex items-center gap-2 text-sm font-medium mb-2">
           <ClipboardList className="w-4 h-4 text-primary" />
           Rúbrica de evaluación
@@ -42,7 +42,7 @@ export default function RecursosPanel(props: Props) {
       </div>
 
       {/* ── Reglamento UPAO ──────────────────────────────────── */}
-      <div className="glass rounded-2xl p-3.5">
+      <div className="glass-scroll rounded-2xl p-3.5">
         <div className="flex items-center gap-2 text-sm font-medium mb-2">
           <Building2 className="w-4 h-4 text-primary" />
           Reglamento UPAO

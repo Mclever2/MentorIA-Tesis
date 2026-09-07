@@ -18,6 +18,33 @@ export interface DocumentoInfo {
   ya_indexado: boolean;
   estructura_toc: Record<string, number>;
   stats: SeccionStat[];
+  /** De dónde vino el proyecto: "pdf" | "docx" | "texto". */
+  formato?: string;
+  /** Con qué señal se resolvió la estructura (estilos de Word, marcadores, índice…). */
+  origen_estructura?: string;
+  /** Avisos de la indexación (páginas sin texto, índice desfasado, sin encabezados…). */
+  avisos?: string[];
+  alcance?: AlcanceInfo;
+}
+
+/** Qué partes del proyecto se someten a evaluación. */
+export interface AlcanceInfo {
+  modo: "auto" | "declarado";
+  grupos: string[];
+  items: number[];
+}
+
+export interface GrupoAlcance {
+  grupo: string;
+  items: number[];
+  descripcion: string;
+}
+
+export interface CatalogoAlcance {
+  grupos: GrupoAlcance[];
+  alcance: AlcanceInfo | Record<string, never>;
+  /** Ítem → caracteres escritos en el proyecto: permite marcar qué ya tiene avance. */
+  chars_por_item: Record<string, number>;
 }
 
 export interface ChatRespuesta {
@@ -67,17 +94,72 @@ export interface DocMemoria {
   ultima_revision?: { tipo?: string; texto?: string };
 }
 
+/** Origen del proyecto: un archivo, texto pegado o un enlace de Google Docs. */
+export type FuenteDocumento =
+  | { tipo: "archivo"; archivo: File }
+  | { tipo: "texto"; texto: string; nombre?: string }
+  | { tipo: "enlace"; enlace: string };
+
 export async function subirDocumento(
-  archivo: File,
+  fuente: File | FuenteDocumento,
   memoria?: DocMemoria | null,
 ): Promise<DocumentoInfo> {
   const form = new FormData();
-  form.append("archivo", archivo);
+  const origen: FuenteDocumento =
+    fuente instanceof File ? { tipo: "archivo", archivo: fuente } : fuente;
+
+  if (origen.tipo === "archivo") {
+    form.append("archivo", origen.archivo);
+  } else if (origen.tipo === "texto") {
+    form.append("texto", origen.texto);
+    form.append("nombre", origen.nombre ?? "Texto pegado");
+  } else {
+    form.append("enlace", origen.enlace);
+  }
   if (memoria) form.append("memoria", JSON.stringify(memoria));
   const res = await fetch(`${API_URL}/api/documentos`, {
     method: "POST",
     headers: await authHeaders(),
     body: form,
+  });
+  if (!res.ok) await manejarError(res);
+  return res.json();
+}
+
+/** Texto pegado cuando YA hay proyecto: se ubica en una sección y se guarda como
+ *  versión de trabajo, sin pisar el documento original. */
+export async function agregarFragmento(
+  docId: string,
+  texto: string,
+  nombre = "Texto pegado",
+): Promise<{ seccion: string | null; mensaje: string }> {
+  const res = await fetch(`${API_URL}/api/fragmento`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ doc_id: docId, texto, nombre }),
+  });
+  if (!res.ok) await manejarError(res);
+  return res.json();
+}
+
+/** Grupos evaluables + alcance actual del proyecto. */
+export async function obtenerAlcance(docId: string): Promise<CatalogoAlcance> {
+  const res = await fetch(`${API_URL}/api/alcance?doc_id=${encodeURIComponent(docId)}`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) await manejarError(res);
+  return res.json();
+}
+
+/** Declara qué partes del proyecto quiere el estudiante que se evalúen. */
+export async function fijarAlcance(
+  docId: string,
+  opciones: { grupos?: string[]; todo?: boolean },
+): Promise<{ alcance: AlcanceInfo }> {
+  const res = await fetch(`${API_URL}/api/alcance`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ doc_id: docId, grupos: opciones.grupos ?? null, todo: !!opciones.todo }),
   });
   if (!res.ok) await manejarError(res);
   return res.json();

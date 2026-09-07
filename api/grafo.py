@@ -26,6 +26,16 @@ NODO_LABELS = {
 }
 
 
+def _bloque_alcance(doc) -> str:
+    """Instrucción de alcance del documento (vacía si evalúa el proyecto entero)."""
+    try:
+        from backend import alcance as alcance_mod
+        return alcance_mod.bloque_prompt(doc)
+    except Exception:                                          # noqa: BLE001
+        logger.warning("[grafo] No se pudo resolver el alcance; se evalúa todo", exc_info=True)
+        return ""
+
+
 def construir_estado_inicial(
     run_id: str,
     seccion: str,
@@ -38,6 +48,7 @@ def construir_estado_inicial(
     programa: str = "ingeniería de sistemas",
     modalidad: str = "tesis",
     perfil_institucional: Optional[str] = None,
+    alcance: str = "",
     tipo_investigacion: Optional[str] = None,
     diseno: Optional[str] = None,
     meta_aprobacion: float = 0.90,
@@ -50,7 +61,16 @@ def construir_estado_inicial(
     `texto_inicial`: semilla para `texto_iterado` — en las iteraciones 2+ del núcleo
     el redactor parte del texto YA mejorado en la vuelta anterior (no del original),
     para acercarse más al máximo en cada iteración.
+
+    `alcance`: instrucción sobre qué partes del proyecto están declaradas como
+    evaluables. Se adjunta al perfil institucional porque ése es el bloque que
+    TODOS los agentes (auditor, metodólogo, redactor, disenso) ya reciben, así el
+    límite llega a la red entera sin duplicar la regla en cada prompt.
     """
+    perfil = (perfil_institucional or "").strip()
+    if alcance.strip():
+        perfil = "\n\n".join(p for p in (perfil, alcance.strip()) if p)
+
     return {
         "modo_nucleo":                 modo_nucleo,
         "nucleo_plan":                 nucleo_plan,
@@ -58,7 +78,8 @@ def construir_estado_inicial(
         "universidad":                 universidad,
         "programa":                    programa,
         "modalidad":                   modalidad,
-        "perfil_institucional":        perfil_institucional,
+        "perfil_institucional":        perfil or None,
+        "alcance_declarado":           alcance or None,
         "tipo_investigacion":          tipo_investigacion,
         "diseno":                      diseno,
         "puntaje_inicial":             0.0,
@@ -184,6 +205,7 @@ def ejecutar_seccion(
         universidad=doc.universidad or "upao",
         programa=doc.programa or "ingeniería de sistemas",
         perfil_institucional=doc.perfil_institucional,
+        alcance=_bloque_alcance(doc),
         tipo_investigacion=tipo_inv,
         diseno=diseno,
         modo_nucleo=modo_nucleo,

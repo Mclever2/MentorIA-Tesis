@@ -22,10 +22,15 @@ class DocumentoActivo:
     doc_id: str
     user_id: str
     nombre: str
-    pdf_hash: str
+    contenido_hash: str
     vector_store: Any
     estructura_toc: dict
     stats: list
+    # De dónde vino y cómo se leyó: formato de origen (pdf/docx/texto), de qué
+    # señal salió la estructura y los avisos que hay que mostrarle al estudiante.
+    formato: str = "pdf"
+    origen_estructura: str = "ninguna"
+    avisos: list = field(default_factory=list)
     rubrica: Optional[dict] = None
     rubrica_nombre: Optional[str] = None
     universidad: Optional[str] = None
@@ -39,6 +44,11 @@ class DocumentoActivo:
     # Resumen compacto de la última revisión (completa o por secciones), para que el
     # agente de chat rápido no pierda el hilo. {"tipo","texto"}.
     ultima_revision: dict = field(default_factory=dict)
+    # ALCANCE declarado por el estudiante: qué partes de su proyecto quiere que se
+    # evalúen. Sin él, los agentes exigían secciones que aún no ha escrito y le
+    # bajaban la nota por trabajo que todavía no tocaba entregar.
+    # {"grupos": [...], "items": [int], "modo": "auto"|"declarado"}
+    alcance: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -80,9 +90,9 @@ def obtener_documento(doc_id: str) -> Optional[DocumentoActivo]:
     return _DOCS.get(doc_id)
 
 
-def buscar_documento_por_hash(user_id: str, pdf_hash: str) -> Optional[DocumentoActivo]:
+def buscar_documento_por_hash(user_id: str, contenido_hash: str) -> Optional[DocumentoActivo]:
     for doc in _DOCS.values():
-        if doc.user_id == user_id and doc.pdf_hash == pdf_hash:
+        if doc.user_id == user_id and doc.contenido_hash == contenido_hash:
             return doc
     return None
 

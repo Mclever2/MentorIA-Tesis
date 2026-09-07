@@ -38,7 +38,7 @@ export default function ReglamentoModal({
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-5 py-6 space-y-5">
           {/* ── Vigencia ─────────────────────────────────────── */}
-          <section className="glass rounded-3xl p-5">
+          <section className="glass-scroll rounded-3xl p-5">
             <h2 className="font-semibold flex items-center gap-2 mb-2">
               <BadgeCheck className="w-4 h-4 text-[#34C759]" /> Vigencia
               <span className="text-xs font-medium text-[#34C759]">
@@ -54,7 +54,7 @@ export default function ReglamentoModal({
           </section>
 
           {/* ── Puntos que afectan tu proyecto ───────────────── */}
-          <section className="glass rounded-3xl p-5">
+          <section className="glass-scroll rounded-3xl p-5">
             <h2 className="font-semibold flex items-center gap-2 mb-3">
               <ScrollText className="w-4 h-4 text-primary" /> Puntos que afectan tu proyecto
             </h2>
@@ -73,7 +73,7 @@ export default function ReglamentoModal({
           </section>
 
           {/* ── Cómo modula a los agentes ────────────────────── */}
-          <section className="glass rounded-3xl p-5">
+          <section className="glass-scroll rounded-3xl p-5">
             <h2 className="font-semibold mb-2">Cómo adapta la conducta de los agentes</h2>
             <p className="text-[14px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
               {reglamento.perfil_agentes}

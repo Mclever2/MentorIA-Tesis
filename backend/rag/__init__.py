@@ -6,6 +6,7 @@ Permite importar desde backend.rag directamente sin conocer la estructura intern
 """
 
 from .extractor      import extraer_texto_pdf, extraer_contenido_sin_indice
+from .estructura     import resolver_estructura, clasificar_semantica
 from .embeddings     import cargar_modelo_embeddings, MODELO_EMBEDDING
 from .rubric_parser  import parse_rubrica_pdf, rubrica_a_texto_prompt
 from .tesis_store   import (
@@ -30,6 +31,8 @@ from .library_store import (
 __all__ = [
     "extraer_texto_pdf",
     "extraer_contenido_sin_indice",
+    "resolver_estructura",
+    "clasificar_semantica",
     "cargar_modelo_embeddings",
     "MODELO_EMBEDDING",
     "parse_rubrica_pdf",

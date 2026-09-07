@@ -183,6 +183,7 @@ def make_nodo_auditor(llm: ChatOpenAI):
         umbral_aprob = max(1, round(escala_max * 2 / 3))  # ítem "en regla" si ≥ ~2/3 de la escala
 
         from backend.enfoque import bloque_enfoque
+        from backend.reglas_seccion import reglas_de_nucleo, reglas_para
         enfoque = bloque_enfoque(state.get("tipo_investigacion"), state.get("diseno"))
 
         logger.info("[Auditor] Planificando contexto adicional con RAG dinámico…")
@@ -223,9 +224,22 @@ Tu tarea principal ahora es VERIFICAR SI ESTOS ERRORES FUERON CORREGIDOS en el n
         else:
             contexto_iteracion = ""
 
+        # Evidencia VERIFICADA fuera del modelo. El auditor juzgaba «de memoria» dos
+        # cosas que se pueden medir: la extensión/delimitación del título y la
+        # antigüedad de las citas. Dárselas medidas evita tanto el falso positivo
+        # («faltan referencias actuales» cuando sí las hay) como el falso negativo.
+        evidencia_verificada = _evidencia_verificada(
+            seccion=seccion,
+            texto=texto_a_evaluar,
+            tipo_investigacion=state.get("tipo_investigacion"),
+            diseno=state.get("diseno"),
+            contexto_proyecto=(contexto_dinamico or state.get("contexto_dependencias") or "")[:2000],
+        )
+
         inputs_base = {
             "seccion":               seccion,
             "texto_iterado":         texto_a_evaluar,
+            "evidencia_verificada":  evidencia_verificada,
             "items_rubrica":         items_texto,
             "puntaje_max":           puntaje_max,
             "escala_max":            escala_max,
@@ -236,6 +250,15 @@ Tu tarea principal ahora es VERIFICAR SI ESTOS ERRORES FUERON CORREGIDOS en el n
             "programa":              programa,
             "contexto_iteracion":    contexto_iteracion,
             "enfoque":               enfoque,
+            # Las mismas reglas que recibe el redactor y que aplican los paneles de
+            # asesoría. Sin ellas el auditor penalizaba lo que el asesor había
+            # recomendado: exigía validación de expertos para una métrica que
+            # calcula el sistema, o resultados finales en Tesis 1.
+            "reglas_seccion":        (reglas_de_nucleo() if state.get("modo_nucleo")
+                                     else reglas_para(state.get("seccion_objetivo", ""))),
+            # El alcance declarado: sin él el auditor exige partes que el
+            # estudiante dijo que aún no entrega.
+            "alcance_declarado":     state.get("alcance_declarado") or "",
             "rubrica_institucional_drive": "",
             "contexto_biblioteca_disponible": "",
             "contexto_secciones_relacionadas": "",
@@ -265,12 +288,15 @@ Tu tarea principal ahora es VERIFICAR SI ESTOS ERRORES FUERON CORREGIDOS en el n
                 ("system", system_prompt),
                 ("human", (
                     "{enfoque}\n\n"
+                    "{alcance_declarado}\n\n"
                     "REGLA DE TIPO: si un ítem de la rúbrica exige algo que el ENFOQUE de arriba NO "
                     "requiere (p. ej. hipótesis en un estudio cualitativo, una 2.ª variable cuando el "
                     "tipo usa una sola, operacionalización donde no corresponde), marca ese ítem con "
                     "aplica_al_tipo=false y NO bajes su puntaje por esa ausencia; en la observación "
                     "explica que por el tipo no es exigible. Todo lo demás: aplica_al_tipo=true.\n\n"
                     "Evalúa el texto para la sección '{seccion}' y devuelve tu evaluación estructurada.\n\n"
+                    "**EVIDENCIA VERIFICADA FUERA DEL MODELO (dala por cierta; no la recalcules "
+                    "ni la contradigas):**\n{evidencia_verificada}\n\n"
                     "**HISTORIAL DEL PANEL (evaluadores anteriores):**\n{historial_panel}\n\n"
                     "{rubrica_institucional_drive}"
                     "{contexto_biblioteca_disponible}"
@@ -508,5 +534,24 @@ Tu tarea principal ahora es VERIFICAR SI ESTOS ERRORES FUERON CORREGIDOS en el n
 
 
     return nodo_auditor
+
+
+def _evidencia_verificada(
+    seccion: str,
+    texto: str,
+    tipo_investigacion: str | None,
+    diseno: str | None,
+    contexto_proyecto: str,
+) -> str:
+    """Hechos medidos sobre el texto, para que el auditor no los estime."""
+    from backend.verificaciones import mediciones_de_seccion
+
+    return mediciones_de_seccion(
+        seccion=seccion,
+        texto=texto,
+        tipo_investigacion=tipo_investigacion,
+        diseno=diseno,
+        contexto_proyecto=contexto_proyecto,
+    )
 
 

@@ -76,6 +76,67 @@ def puntaje_a_nota(puntaje: int) -> int:
     return 0
 
 
+# ── Plantilla UPAO: dos árboles de numeración en el MISMO documento ─────────
+#
+# El proyecto oficial se parte en «I GENERALIDADES» (portada administrativa:
+# 1 Título · 2 Equipo investigador · 3 Tipo de investigación · 4 Línea ·
+# 5 Unidad académica · 6 Institución · 7 Duración · 8 Horas) y «II PLAN DE
+# INVESTIGACIÓN» (1 Planteamiento · 2 Marco teórico · 3 Hipótesis y variables ·
+# 4 Marco metodológico · 5 Aspectos administrativos · 6 Referencias · 7 Anexos).
+# Los números se repiten, así que el mapeo por PREFIJO cruzaba las dos mitades:
+#   «2.2 Asesor»                        → «2.2 Investigaciones antecedentes» (11, 15)
+#   «3.1 De acuerdo con la orientación» → «3.1–3.2 Hipótesis»                (18, 19)
+#   «5.1 Programa de estudio»           → «5. Aspectos administrativos»      (28-31)
+#   «1.5 Limitaciones del estudio»      → «1. Título del proyecto» (por ancestro «1»)
+# Es decir: los datos del asesor se calificaban como antecedentes y las
+# limitaciones como título. Verificado en los 10 proyectos REP_ISIA de la
+# facultad: la estructura es idéntica en todos, no es una rareza de uno.
+#
+# La portada no tiene ítems de rúbrica propios, pero NO es ruido descartable: la
+# línea de investigación y el programa son la ÚNICA evidencia del ítem 3 («el
+# estudio se enmarca en la línea que promueve el programa»), que hasta ahora se
+# puntuaba leyendo solo el título. Por eso esas dos se enrutan al título y el
+# resto se agrupa aparte, disponible como contexto pero sin calificar.
+PORTADA_UPAO = "I. Generalidades (portada)"
+
+# (prefijo del árbol de GENERALIDADES) → palabras que deben aparecer en el
+# encabezado. El prefijo es lo que desambigua: «3 Tipo de investigación» es
+# portada, «4.1 Tipo de investigación» es el marco metodológico y sí se califica.
+_PORTADA_UPAO: dict[str, tuple[str, ...]] = {
+    "2":   ("equipo", "investigador"),
+    "2.1": ("autor",),
+    "2.2": ("asesor",),
+    "3":   ("tipo", "investigacion"),
+    "3.1": ("acuerdo", "orientacion"),
+    "3.2": ("acuerdo", "tecnica"),
+    "4":   ("linea", "investigacion"),
+    "5":   ("unidad", "academica"),
+    "5.1": ("programa", "estudio"),
+    "5.2": ("facultad",),
+    "5.3": ("universidad",),
+    "6":   ("institucion", "localidad"),
+    "7":   ("duracion",),
+    "7.1": ("fecha", "inicio"),
+    "7.2": ("fecha", "termino"),
+    "8":   ("horas", "dedicadas"),
+}
+
+# Las dos secciones de portada que SÍ son evidencia de rúbrica (ítem 3).
+_PORTADA_AL_TITULO = {"4", "5.1"}
+
+
+def _clave_portada_upao(seccion: str) -> str | None:
+    """Clave de rúbrica de una sección de «I GENERALIDADES», o None si no lo es."""
+    prefijo = _prefijo_num(seccion)
+    requeridas = _PORTADA_UPAO.get(prefijo)
+    if not requeridas:
+        return None
+    texto = unicodedata.normalize("NFKD", seccion).encode("ascii", "ignore").decode().lower()
+    if not all(palabra in texto for palabra in requeridas):
+        return None
+    return "1. Título del proyecto" if prefijo in _PORTADA_AL_TITULO else PORTADA_UPAO
+
+
 SECCION_ITEMS_MAP: dict[str, list[int]] = {
     "1. Título del proyecto":                    [1, 2, 3],
     "1.1 Descripción y delimitación":            [4, 5],
@@ -96,6 +157,10 @@ SECCION_ITEMS_MAP: dict[str, list[int]] = {
     "4.7 Análisis de datos":                     [27],
     "5. Aspectos administrativos":               [28, 29, 30, 31],
     "III. Referencias bibliográficas":           [32, 33],
+    # Sin ítems propios, pero con clave propia a propósito: son las dos secciones
+    # que el mapeo por número mandaba a la unidad equivocada. Ver PORTADA_UPAO.
+    PORTADA_UPAO:                                [],
+    "1.5 Limitaciones del estudio":              [],
 }
 
 SECCIONES_TESIS: list[dict] = [
@@ -231,22 +296,49 @@ def _prefijos_rango(seccion: str) -> list[str]:
 
 
 def _mejor_semantica(seccion: str) -> tuple[str | None, float]:
-    """Mejor clave de SECCION_ITEMS_MAP por solapamiento de palabras clave (Jaccard)."""
+    """Mejor clave de SECCION_ITEMS_MAP por solapamiento de palabras clave.
+
+    Se mide con Jaccard y con CONTENCIÓN (intersección / conjunto más pequeño),
+    y se devuelve la mayor de las dos. La contención es la que salva el caso
+    real que rompía la evaluación: un estudiante titula «1.3 OBJETIVOS» y la
+    clave de la plantilla es «1.2 Objetivos (General y Específicos)». El Jaccard
+    ahí es 1/3 = 0.33 —solo porque la plantilla añade dos palabras—, así que no
+    llegaba al umbral de semántica fuerte y mandaba el PREFIJO numérico: sus
+    objetivos se mapeaban a «1.3 Importancia del estudio» y los ítems 6 y 7
+    salían «ausente» con 0 puntos pese a estar escritos. Con contención el
+    solapamiento vale 1.0 y la semántica manda, que es lo correcto.
+    """
     kw = _kw_seccion(seccion)
     if not kw:
         return None, 0.0
     mejor_key: str | None = None
-    mejor_jaccard = 0.0
+    mejor: tuple[float, float] = (0.0, 0.0)
+    fuerza = 0.0
     for k in SECCION_ITEMS_MAP:
         kw_k = _kw_seccion(k)
         inter = len(kw & kw_k)
         if inter == 0:
             continue
         jaccard = inter / len(kw | kw_k)
-        if jaccard > mejor_jaccard:
-            mejor_jaccard = jaccard
+        contencion = inter / min(len(kw), len(kw_k))
+        # El Jaccard desempata: varias claves pueden CONTENER la misma palabra
+        # («Variables» está en «Base teórica (Variables)» y en «Variables
+        # (Operacionalización)»), y sin desempate ganaba la primera del
+        # diccionario. El Jaccard premia a la clave más ajustada.
+        candidato = (max(jaccard, contencion), jaccard)
+        if candidato > mejor:
+            mejor = candidato
             mejor_key = k
-    return mejor_key, mejor_jaccard
+            # La contención solo cuenta como semántica FUERTE cuando es TOTAL.
+            # A medias es una palabra genérica compartida, no un significado
+            # común: «2.3.1 Aplicación web con analítica de DATOS» contra
+            # «4.7 Análisis de DATOS» da 0.5 y, con el umbral en 0.5, esa
+            # subsección del marco teórico se calificaba como las técnicas de
+            # procesamiento de datos (ítem 27). El caso que la contención vino a
+            # resolver («1.3 OBJETIVOS» → «1.2 Objetivos (General y
+            # Específicos)») es contención 1.0 y sigue ganando.
+            fuerza = max(jaccard, contencion if contencion >= 1.0 else 0.0)
+    return mejor_key, fuerza
 
 
 def _seccion_rubrica_para(seccion: str) -> str | None:
@@ -259,11 +351,17 @@ def _seccion_rubrica_para(seccion: str) -> str | None:
       1. Coincidencia exacta de nombre.
       2. Semántica FUERTE (Jaccard ≥ 0.5) si discrepa del prefijo → manda la semántica.
       3. Prefijo numérico exacto.
-      4. Semántica débil (cualquier solapamiento).
-      5. Ancestro numérico subiendo niveles ('5.2.1' → '5.2' → '5').
+      4. Ancestro numérico subiendo niveles ('5.2.1' → '5.2' → '5').
+      5. Semántica débil (cualquier solapamiento).
     """
     if seccion in SECCION_ITEMS_MAP:
         return seccion
+
+    # La portada se resuelve antes que nada: su numeración choca de frente con la
+    # del plan de investigación y cualquier heurística posterior elige mal.
+    portada = _clave_portada_upao(seccion)
+    if portada:
+        return portada
 
     prefijo_num = _prefijo_num(seccion) or None
     cand_prefijo: str | None = None
@@ -280,9 +378,12 @@ def _seccion_rubrica_para(seccion: str) -> str | None:
         return cand_sem
     if cand_prefijo:
         return cand_prefijo
-    if cand_sem:
-        return cand_sem
 
+    # El ANCESTRO numérico va ANTES que la semántica débil: que «2.3.1» viva
+    # dentro de «2.3» es un hecho de la estructura del documento, mientras que un
+    # solapamiento de una sola palabra suele ser casualidad. Con el orden
+    # anterior, «2.3.1 Aplicación web con analítica de DATOS» —marco teórico—
+    # terminaba en «4.7 Análisis de DATOS» y se calificaba con el ítem 27.
     if prefijo_num:
         partes = prefijo_num.split('.')
         for corte in range(len(partes) - 1, 0, -1):
@@ -290,6 +391,9 @@ def _seccion_rubrica_para(seccion: str) -> str | None:
             for k in SECCION_ITEMS_MAP:
                 if _prefijo_num(k) == padre:
                     return k
+
+    if cand_sem:
+        return cand_sem
 
     return None
 

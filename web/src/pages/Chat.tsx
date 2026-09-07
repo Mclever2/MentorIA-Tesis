@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { Session } from "@supabase/supabase-js";
 import { motion } from "framer-motion";
-import { BookOpenCheck, FileSearch, Layers, ListChecks, Loader2, Menu } from "lucide-react";
+import { BookOpenCheck, FileSearch, Layers, ListChecks, Loader2, Menu, Target } from "lucide-react";
 
+import AlcanceSelector from "@/components/chat/AlcanceSelector";
 import AnalisisPanel from "@/components/chat/AnalisisPanel";
 import RevisionCompletaPanel from "@/components/chat/RevisionCompletaPanel";
 import ChatInput from "@/components/chat/ChatInput";
@@ -17,23 +18,29 @@ import Sidebar from "@/components/chat/Sidebar";
 import UploadZone from "@/components/chat/UploadZone";
 import { Button } from "@/components/ui/button";
 import {
+  agregarFragmento,
   cancelarRun,
+  fijarAlcance,
   enviarChat,
   enviarHeartbeat,
   obtenerReglamentoUpao,
   obtenerRubricaUpao,
   streamRun,
   subirDocumento,
+  type AlcanceInfo,
+  type FuenteDocumento,
   type ChatFlags,
   type DocMemoria,
   type DocumentoInfo,
   type EventoRun,
 } from "@/lib/api";
 import {
-  borrarPdfDeStorage,
+  borrarDocDeStorage,
   guardarDocEnConversacion,
+  guardarDocEnStorage,
   guardarMemoria,
-  guardarPdfEnStorage,
+  guardarAlcance,
+  guardarTextoEnStorage,
   leerDocPersistido,
   memoriaVacia,
   rehidratar,
@@ -42,6 +49,7 @@ import {
 import { supabase } from "@/lib/supabase";
 import type {
   AccionMensaje,
+  AdjuntoTexto,
   AnalisisDetalle,
   Conversacion,
   Mensaje,
@@ -86,6 +94,11 @@ export default function Chat({ session }: { session: Session | null }) {
   const [verReglamento, setVerReglamento] = useState(false);
   // Hay proyecto cargado o persistido (rehidratable).
   const [proyectoDisponible, setProyectoDisponible] = useState(false);
+  // doc_id cuyo alcance el estudiante aún no ha declarado: mientras esté puesto
+  // se muestra el selector "¿qué parte quieres que evalúe?".
+  const [alcancePorDeclarar, setAlcancePorDeclarar] = useState<string | null>(null);
+  // Alcance vigente del chat (para mostrarlo y poder reabrir el selector).
+  const [alcance, setAlcance] = useState<AlcanceInfo | null>(null);
 
   const runIdRef = useRef<string | null>(null);
   const pendienteRef = useRef<{ texto: string; flags: ChatFlags } | null>(null);
@@ -156,6 +169,9 @@ export default function Chat({ session }: { session: Session | null }) {
     if (m.estructura) metadata.estructura = m.estructura;
     if (m.detalles?.length) metadata.detalles = m.detalles;
     if (m.revision) metadata.revision = m.revision;
+    // Los adjuntos de texto viajan en metadata: al reabrir el chat el pegado
+    // sigue viéndose como chip y no como un muro de texto en la burbuja.
+    if (m.adjuntos?.length) metadata.adjuntos = m.adjuntos;
     await supabase.from("mensajes").insert({
       conversacion_id: convId,
       rol: m.rol,
@@ -185,6 +201,7 @@ export default function Chat({ session }: { session: Session | null }) {
       estructura: r.metadata?.estructura,
       detalles: r.metadata?.detalles,
       revision: r.metadata?.revision,
+      adjuntos: r.metadata?.adjuntos,
     }));
     setMensajes(cargados);
     setPasos([]);
@@ -194,6 +211,8 @@ export default function Chat({ session }: { session: Session | null }) {
     docPersistidoRef.current = persistido;
     docMemoriaRef.current = persistido?.memoria ?? memoriaVacia();
     setProyectoDisponible(persistido !== null);
+    setAlcance(persistido?.alcance ?? null);
+    setAlcancePorDeclarar(null);
     // El mapeo rúbrica→secciones depende del proyecto activo: se refresca al abrir.
     setRubricaInfo(null);
   }
@@ -201,7 +220,7 @@ export default function Chat({ session }: { session: Session | null }) {
   async function eliminarConversacion(id: string) {
     if (!supabase) return;
     const persistido = await leerDocPersistido(id);
-    await borrarPdfDeStorage(persistido?.storagePath ?? null);
+    await borrarDocDeStorage(persistido?.storagePath ?? null);
     await supabase.from("conversaciones").delete().eq("id", id);
     if (id === convActiva) nuevaAsesoria();
     cargarConversaciones();
@@ -220,6 +239,8 @@ export default function Chat({ session }: { session: Session | null }) {
     docMemoriaRef.current = memoriaVacia();
     setProyectoDisponible(false);
     setRubricaInfo(null);
+    setAlcance(null);
+    setAlcancePorDeclarar(null);
   }
 
   function agregarMensaje(m: Mensaje, convId?: string | null) {
@@ -227,8 +248,12 @@ export default function Chat({ session }: { session: Session | null }) {
     guardarMensaje(convId ?? convActiva, m);
   }
 
-  // ── Subida / reemplazo del PDF de tesis ──────────────────────────────────────
-  async function subirTesis(archivo: File) {
+  // ── Subida / reemplazo del proyecto ──────────────────────────────────────────
+  /** Indexa el proyecto venga como venga: archivo, texto pegado o Google Doc. */
+  async function subirTesis(entrada: File | FuenteDocumento) {
+    const fuente: FuenteDocumento =
+      entrada instanceof File ? { tipo: "archivo", archivo: entrada } : entrada;
+
     setSubiendo(true);
     setEtapaSubida("Extrayendo texto y detectando la estructura…");
     const timer = setTimeout(
@@ -236,22 +261,32 @@ export default function Chat({ session }: { session: Session | null }) {
       3500,
     );
     try {
-      // PDF nuevo = empieza de cero la memoria del hilo
+      // Proyecto nuevo = empieza de cero la memoria del hilo
       docMemoriaRef.current = memoriaVacia();
       docPersistidoRef.current = null;
 
-      const info = await subirDocumento(archivo, null);
+      const info = await subirDocumento(fuente, null);
       setDoc(info);
       setProyectoDisponible(true);
+      setAlcance(info.alcance ?? null);
       // El mapeo rúbrica→secciones se recalcula contra el TOC de ESTE proyecto.
       setRubricaInfo(null);
 
       const convId = await asegurarConversacion(`Asesoría — ${info.nombre}`);
 
-      // Persistir: PDF en Storage + metadata en la conversación
+      // Persistir el original en Storage + metadata en la conversación, para
+      // poder re-indexar al reabrir el chat. El texto pegado se guarda como .txt.
       let storagePath: string | null = null;
       if (convId && userId) {
-        storagePath = await guardarPdfEnStorage(userId, convId, archivo);
+        storagePath =
+          fuente.tipo === "archivo"
+            ? await guardarDocEnStorage(userId, convId, fuente.archivo)
+            : await guardarTextoEnStorage(
+                userId,
+                convId,
+                fuente.tipo === "texto" ? fuente.texto : "",
+                info.nombre,
+              );
         await guardarDocEnConversacion(convId, info, storagePath, docMemoriaRef.current);
       }
 
@@ -269,22 +304,28 @@ export default function Chat({ session }: { session: Session | null }) {
         },
         convId,
       );
-      agregarMensaje(
-        {
-          id: nuevoId(),
-          rol: "assistant",
-          contenido:
-            "Tu proyecto está indexado y se quedará en este chat. Pregúntame dudas " +
-            "metodológicas o pídeme una revisión: una sección («revisa mis objetivos») " +
-            "o **todo el proyecto** para detectar sus puntos débiles.",
-        },
-        convId,
-      );
+
+      // Avisos de la indexación (páginas sin texto, índice desfasado, documento
+      // sin encabezados…). Antes fallaban en silencio y el estudiante no entendía
+      // por qué su proyecto se evaluaba a medias.
+      if (info.avisos?.length) {
+        agregarMensaje(
+          {
+            id: nuevoId(),
+            rol: "assistant",
+            contenido: info.avisos.map((a) => `⚠️ ${a}`).join("\n\n"),
+          },
+          convId,
+        );
+      }
+
+      // Antes de evaluar nada, que declare en qué está trabajando.
+      setAlcancePorDeclarar(info.doc_id);
     } catch (exc) {
       agregarMensaje({
         id: nuevoId(),
         rol: "assistant",
-        contenido: `⚠️ No pude procesar el PDF: ${exc instanceof Error ? exc.message : exc}`,
+        contenido: `⚠️ No pude procesar el documento: ${exc instanceof Error ? exc.message : exc}`,
       });
     } finally {
       clearTimeout(timer);
@@ -306,11 +347,35 @@ export default function Chat({ session }: { session: Session | null }) {
         setProyectoDisponible(true);
         setRubricaInfo(null);
         docPersistidoRef.current = null;
+        // El alcance es una decisión del estudiante: al re-indexar hay que
+        // reponerla, o el backend volvería a su sugerencia automática y podría
+        // calificar partes que él había dejado fuera.
+        if (persistido.alcance?.grupos?.length) {
+          try {
+            const res = await fijarAlcance(info.doc_id, { grupos: persistido.alcance.grupos });
+            setAlcance(res.alcance);
+          } catch {
+            setAlcance(persistido.alcance);
+          }
+        } else {
+          setAlcance(info.alcance ?? null);
+        }
       }
       return info;
     } finally {
       setSubiendo(false);
     }
+  }
+
+  /**
+   * Abre el selector de alcance. Se puede reabrir SIEMPRE (también después de
+   * una revisión): la selección es del estudiante y cambia conforme redacta.
+   * Si el chat se reabrió y el proyecto aún no está re-indexado, lo reanuda
+   * antes; si no, el botón quedaba muerto sin explicar por qué.
+   */
+  async function abrirAlcance() {
+    const info = doc ?? (await asegurarDocVivo());
+    if (info) setAlcancePorDeclarar(info.doc_id);
   }
 
   // ── Recursos fijos: rúbrica UPAO + reglamento UPAO (solo consulta) ──────────
@@ -417,6 +482,9 @@ export default function Chat({ session }: { session: Session | null }) {
             fortalezas: e.fortalezas as string[] | undefined,
             debilidades: e.debilidades as string[] | undefined,
             trazabilidad: e.trazabilidad as RevisionCompleta["trazabilidad"],
+            // Sin esto el panel no sabe que la nota es PARCIAL y la presenta
+            // como si fuera la calificación sobre los 33 ítems.
+            alcance: e.alcance as RevisionCompleta["alcance"],
           } as RevisionCompleta)
         : undefined;
       finalizar(String(e.informe_md ?? ""), (e.detalles as AnalisisDetalle[]) ?? [], rev);
@@ -465,9 +533,71 @@ export default function Chat({ session }: { session: Session | null }) {
       .map((m) => ({ rol: m.rol, contenido: m.contenido.slice(0, 2000) }));
   }
 
-  function enviarMensaje(texto: string) {
+  function enviarMensaje(texto: string, adjuntos: AdjuntoTexto[] = []) {
+    if (adjuntos.length) {
+      procesarPegado(texto, adjuntos);
+      return;
+    }
     pendienteRef.current = { texto, flags: {} };
     procesarMensaje(texto, {}, { reenvio: false });
+  }
+
+  /**
+   * Texto largo pegado por el estudiante.
+   *
+   * Sin proyecto todavía, ESE texto es el proyecto y se indexa entero. Con un
+   * proyecto ya cargado, cada adjunto se ubica en su sección y se guarda como
+   * versión de trabajo: el documento original nunca se pisa sin preguntar.
+   */
+  async function procesarPegado(texto: string, adjuntos: AdjuntoTexto[]) {
+    const convId = await asegurarConversacion(texto || adjuntos[0].nombre);
+    agregarMensaje({ id: nuevoId(), rol: "user", contenido: texto, adjuntos }, convId);
+
+    const hayProyecto = !!doc || !!docPersistidoRef.current;
+    if (!hayProyecto) {
+      const unido = adjuntos.map((a) => a.texto).join("\n\n");
+      await subirTesis({ tipo: "texto", texto: unido, nombre: "Proyecto pegado" });
+      if (texto.trim()) {
+        pendienteRef.current = { texto, flags: {} };
+        await procesarMensaje(texto, {}, { reenvio: true });
+      }
+      return;
+    }
+
+    const docActivo = doc ?? (await asegurarDocVivo());
+    if (!docActivo) {
+      agregarMensaje({
+        id: nuevoId(),
+        rol: "assistant",
+        contenido: "⚠️ No pude recuperar tu proyecto para asociar el texto. Vuelve a subirlo.",
+      }, convId);
+      return;
+    }
+
+    setEjecutando(true);
+    try {
+      for (const adjunto of adjuntos) {
+        const res = await agregarFragmento(docActivo.doc_id, adjunto.texto, adjunto.nombre);
+        agregarMensaje({ id: nuevoId(), rol: "assistant", contenido: res.mensaje }, convId);
+        if (res.seccion) {
+          docMemoriaRef.current.pendientes[res.seccion] = adjunto.texto;
+          persistirMemoria();
+        }
+      }
+    } catch (exc) {
+      agregarMensaje({
+        id: nuevoId(),
+        rol: "assistant",
+        contenido: `⚠️ No pude indexar el texto pegado: ${exc instanceof Error ? exc.message : exc}`,
+      }, convId);
+    } finally {
+      setEjecutando(false);
+    }
+
+    if (texto.trim()) {
+      pendienteRef.current = { texto, flags: {} };
+      await procesarMensaje(texto, {}, { reenvio: true });
+    }
   }
 
   async function procesarMensaje(
@@ -637,8 +767,28 @@ export default function Chat({ session }: { session: Session | null }) {
         />
       )}
 
-      <main className="flex-1 flex flex-col relative">
+      <main className="flex-1 flex flex-col relative min-w-0 overflow-hidden">
         <FondoLiquido intenso={ejecutando} />
+
+        {/* Botón flotante de Alcance (superior derecho) — accesible al hacer scroll sin tener que subir */}
+        {!vacio && (proyectoDisponible || !!doc) && (
+          <div className="absolute top-2.5 right-4 md:top-4 md:right-6 z-30">
+            <button
+              onClick={abrirAlcance}
+              disabled={ejecutando || subiendo}
+              title="Cambiar qué partes de tu proyecto ya están redactadas"
+              className="flex items-center gap-1.5 rounded-full bg-card/90 backdrop-blur-md border border-blue-500/50 px-3 py-1.5 text-xs font-medium text-foreground shadow-md hover:bg-blue-500/15 hover:border-blue-500 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed group"
+            >
+              <Target className="w-3.5 h-3.5 text-blue-500 group-hover:scale-110 transition-transform shrink-0" />
+              <span className="font-semibold text-blue-600 dark:text-blue-400">Alcance</span>
+              <span className="text-muted-foreground hidden sm:inline max-w-[130px] truncate text-[11px]">
+                · {!alcance || alcance.grupos.length >= 7
+                  ? "todo"
+                  : `${alcance.grupos.length} partes`}
+              </span>
+            </button>
+          </div>
+        )}
 
         <div className="md:hidden flex items-center gap-2 px-4 h-14 shrink-0 border-b border-border bg-card/60 backdrop-blur-xl z-10">
           <button
@@ -667,7 +817,12 @@ export default function Chat({ session }: { session: Session | null }) {
             </motion.div>
 
             <div className="w-full max-w-2xl space-y-5">
-              <UploadZone subiendo={subiendo} etapa={etapaSubida} onArchivo={manejarArchivo} />
+              <UploadZone
+                subiendo={subiendo}
+                etapa={etapaSubida}
+                onArchivo={manejarArchivo}
+                onEnlace={(url) => subirTesis({ tipo: "enlace", enlace: url })}
+              />
               <ChatInput
                 ejecutando={ejecutando}
                 deshabilitado={subiendo}
@@ -698,8 +853,8 @@ export default function Chat({ session }: { session: Session | null }) {
           </div>
         ) : (
           <>
-            <div ref={scrollRef} className="flex-1 overflow-y-auto">
-              <div className="mx-auto max-w-3xl px-5 py-8 space-y-5">
+            <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain">
+              <div className="mx-auto max-w-3xl px-5 py-8 space-y-5 w-full min-w-0">
                 <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                   <span className="rounded-full bg-muted px-2.5 py-1">
                     Rúbrica: <span className="font-medium text-foreground/80">UPAO (oficial)</span>
@@ -707,6 +862,21 @@ export default function Chat({ session }: { session: Session | null }) {
                   <span className="rounded-full bg-muted px-2.5 py-1">
                     Reglamento: <span className="font-medium text-foreground/80">UPAO · vigente 27/05/2026</span>
                   </span>
+                  {proyectoDisponible && (
+                    <button
+                      onClick={abrirAlcance}
+                      disabled={ejecutando || subiendo}
+                      title="Cambiar qué partes de tu proyecto ya están redactadas"
+                      className="rounded-full bg-blue-500/20 border border-blue-500/40 px-2.5 py-1 text-xs hover:bg-blue-500/30 hover:border-blue-400 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <span className="font-semibold text-blue-600 dark:text-blue-400">Alcance:</span>{" "}
+                      <span className="font-medium text-foreground">
+                        {!alcance || alcance.grupos.length >= 7
+                          ? "todo el proyecto"
+                          : alcance.grupos.join(", ").toLowerCase()}
+                      </span>
+                    </button>
+                  )}
                 </div>
                 {mensajes.map((m) => (
                   <MessageBubble
@@ -719,22 +889,47 @@ export default function Chat({ session }: { session: Session | null }) {
                 ))}
 
                 {ejecutando && (
-                  <div className="glass rounded-3xl px-5 py-4">
+                  <div className="glass-scroll rounded-3xl px-5 py-4 min-w-0">
                     <ProgressTimeline pasos={pasos} />
                   </div>
                 )}
 
                 {subiendo && (
-                  <div className="glass rounded-3xl px-5 py-4 text-sm text-muted-foreground flex items-center gap-2">
-                    <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                    {etapaSubida}
+                  <div className="glass-scroll rounded-3xl px-5 py-4 text-sm text-muted-foreground flex items-center gap-2 min-w-0">
+                    <Loader2 className="w-4 h-4 animate-spin text-primary shrink-0" />
+                    <span className="truncate min-w-0">{etapaSubida}</span>
                   </div>
                 )}
               </div>
             </div>
 
             <div className="px-5 pb-5">
-              <div className="mx-auto max-w-3xl">
+              <div className="mx-auto max-w-3xl w-full min-w-0">
+                {alcancePorDeclarar && (
+                  <div className="mb-3">
+                    <AlcanceSelector
+                      docId={alcancePorDeclarar}
+                      onCerrar={() => setAlcancePorDeclarar(null)}
+                      onListo={(alcanceElegido, total) => {
+                        setAlcancePorDeclarar(null);
+                        setAlcance(alcanceElegido);
+                        if (convActiva) guardarAlcance(convActiva, alcanceElegido);
+                        agregarMensaje({
+                          id: nuevoId(),
+                          rol: "assistant",
+                          contenido: total
+                            ? "Anotado: tu proyecto está completo, así que calificaré los 33 ítems " +
+                              "de la rúbrica UPAO. Cuando quieras la revisión, pídemela " +
+                              "(«revisa todo mi proyecto»)."
+                            : `Anotado. Cuando me pidas una revisión calificaré solo ` +
+                              `**${alcanceElegido.grupos.join(", ").toLowerCase()}**; el resto no se ` +
+                              "califica y no te resta. Puedes cambiar esto cuando quieras — también " +
+                              "después de una revisión — con el botón «Alcance» de arriba.",
+                        });
+                      }}
+                    />
+                  </div>
+                )}
                 {archivoPendiente && (
                   <div className="glass rounded-2xl px-4 py-3 mb-3 flex flex-wrap items-center gap-3 text-sm">
                     <span className="font-medium truncate">{archivoPendiente.name}</span>

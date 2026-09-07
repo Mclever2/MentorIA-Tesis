@@ -16,6 +16,7 @@
 - [Requisitos previos](#requisitos-previos)
 - [Instalación](#instalación)
 - [Configuración](#configuración)
+- [Corpus de títulos del repositorio UPAO](#corpus-de-títulos-del-repositorio-upao)
 - [Arrancar el proyecto](#arrancar-el-proyecto)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Cómo usar el sistema](#cómo-usar-el-sistema)
@@ -29,7 +30,19 @@
 
 ## Descripción
 
-El sistema recibe el PDF de un proyecto de tesis, selecciona una sección específica a evaluar y lanza una **red multiagente** que itera para mejorar el texto hasta que el mentor humano lo aprueba.
+El sistema recibe el proyecto de tesis —en **PDF, Word (.docx), texto plano, pegado en el chat o
+importado de un Google Doc compartido**—, el estudiante declara **qué partes quiere que se evalúen**
+y una **red multiagente** itera para mejorar el texto hasta que el mentor humano lo aprueba.
+
+Dos decisiones de diseño que conviene conocer antes de leer el resto:
+
+- **La estructura no depende del índice.** Se busca en cascada: estilos de encabezado de Word →
+  marcadores del PDF → encabezados detectados en el cuerpo → índice con puntos guía (calibrando el
+  desfase entre la página impresa y la física) → clasificación semántica contra la rúbrica. Un avance
+  de tres páginas sin índice se indexa igual que una tesis completa.
+- **La evaluación es incremental.** Un proyecto se escribe por partes durante meses; calificar
+  siempre los 33 ítems ponía 0 en todo lo que el alumno aún no había escrito. Con el **alcance
+  declarado**, lo no entregado no se califica y **no resta**.
 
 **Stack tecnológico:**
 
@@ -185,6 +198,60 @@ Se cargan automáticamente en ChromaDB persistente la primera vez que arranca el
 
 ---
 
+## Corpus de títulos del repositorio UPAO
+
+El panel de título propone títulos anclados en tesis **reales ya aprobadas** por la
+universidad, no en el criterio suelto de un modelo. Ese corpus se cosecha del
+Repositorio Institucional vía **OAI-PMH** (el protocolo estándar de cosecha de
+metadatos que el propio repositorio expone) y se indexa una sola vez:
+
+```bash
+python -m scripts.cosechar_titulos_upao
+```
+
+Recorre los ~16 000 depósitos del repositorio (OAI-PMH no permite filtrar por escuela
+en la petición) pero **guarda solo las ~270 tesis de la escuela de sistemas** en
+`data/titulos_upao.jsonl`: Ingeniería de Computación y Sistemas, Ingeniería de Sistemas
+—incluida la maestría con mención en Sistemas de Información— e Ingeniería de Sistemas
+e Inteligencia Artificial. El criterio vive en [`backend/programas.py`](backend/programas.py).
+
+Guardar el repositorio entero era contraproducente: el corpus es el ANCLA de las
+propuestas de título, y con 3 840 tesis de Medicina y 1 451 de Ingeniería Civil dentro,
+a un tesista de sistemas que consultaba «historias clínicas» se le devolvían patrones de
+investigación clínica. Con `--todas-las-escuelas` se guarda todo (solo para análisis;
+la aplicación filtra igualmente al cargar).
+
+Tarda unos 6 minutos y es reanudable con `--reanudar`. No baja PDFs ni scrapea el sitio;
+se descartan a propósito DNI, ORCID y jurados.
+
+```bash
+python -m scripts.indexar_titulos
+```
+
+Construye el índice vectorial en `chroma_db/titulos_upao/` (~15 s con el corpus acotado).
+Se hace fuera de la API a propósito: embeber títulos dentro de una petición de chat
+dejaría al estudiante esperando.
+
+> Si ya tenías un índice construido con el repositorio completo, recompílalo con
+> `python -m scripts.indexar_titulos --reconstruir`. Las búsquedas van contra Chroma, no
+> contra el JSONL, así que un índice viejo seguiría trayendo tesis de otras facultades.
+> La búsqueda las descarta de todos modos y lo avisa en el log, pero pierdes resultados.
+
+El sistema **degrada en silencio**: si el corpus no está cosechado, el panel de
+título sigue funcionando con sus reglas, solo que sin la evidencia del repositorio.
+
+De ese corpus salen dos cosas que antes el sistema no tenía:
+
+- **Patrón real**: los títulos más cercanos al tema del estudiante, como referencia
+  de forma (cómo nombran la institución, dónde colocan el periodo).
+- **Evidencia de delimitación de la propia escuela**: qué porcentaje de las tesis de
+  sistemas aprobadas nombra el lugar y cuál el año. Convierte «te falta delimitar» en un
+  dato verificable: sobre las 160 tesis de sistemas desde 2020, el 68 % nombra el lugar o
+  la institución, el 51 % incluye el año y solo el 38 % ambos, con una mediana de 21
+  palabras. Ese es el listón real de su escuela, no el promedio de la universidad.
+
+---
+
 ## Arrancar el proyecto
 
 Necesitas **dos procesos**: la API (Python) y la interfaz (React). En desarrollo, Vite
@@ -224,14 +291,14 @@ poc_langgraph_mentoria/
 ├── web/                               # Interfaz React (Vite + Tailwind, estética iOS)
 │   ├── src/
 │   │   ├── pages/                     # Landing, Auth (login Supabase), Chat
-│   │   ├── components/chat/           # Sidebar, ChatInput, MessageBubble, FondoLiquido…
+│   │   │   ├── components/chat/           # ChatInput, AdjuntoChip, AlcanceSelector, MessageBubble…
 │   │   ├── components/ui/             # Primitivas shadcn (button, textarea)
 │   │   └── lib/                       # api.ts (SSE), supabase.ts, utils
 │   ├── .env.example                   # VITE_API_URL + credenciales Supabase
 │   └── package.json
 │
 ├── api/                               # API FastAPI — backend de la interfaz React
-│   ├── main.py                        # Endpoints: subir PDF, chat, streaming SSE del run
+│   ├── main.py                        # Endpoints: documentos, alcance, fragmento, chat, SSE
 │   ├── deps.py                        # Singletons cacheados (grafo, embeddings, biblioteca)
 │   ├── grafo.py                       # Adaptador del grafo LangGraph para la API
 │   ├── registry.py                    # Registro en memoria de vector stores por tesis
@@ -239,10 +306,21 @@ poc_langgraph_mentoria/
 │   └── full_review.py                 # Revisión completa en 3 fases (anti token-burn)
 │
 ├── supabase/
-│   └── schema.sql                     # Tablas conversaciones + mensajes (historial por usuario)
+│   ├── schema.sql                     # Tablas conversaciones + mensajes (historial por usuario)
+│   └── schema_v7.sql                  # doc_alcance: qué partes pidió evaluar el estudiante
 │
 ├── backend/
 │   ├── config.py                      # Rúbrica UPAO (33 ítems), secciones, dependencias cruzadas
+│   ├── alcance.py                     # Alcance declarado: qué se califica y qué no resta
+│   ├── programas.py                   # Escuela objetivo: solo Ing. de Sistemas / Computacion y Sistemas
+│   │
+│   ├── ingesta/                       # Entrada única de documentos (PDF, Word, texto, Google Docs)
+│   │   ├── __init__.py                # Router por firma binaria → DocumentoExtraido
+│   │   ├── pdf.py                     # Cascada pdfium → pdfplumber → pdfminer, página a página
+│   │   ├── word.py                    # .docx con estilos de encabezado y tablas
+│   │   ├── texto_plano.py             # .txt/.md y texto pegado, con detección de encoding
+│   │   ├── gdocs.py                   # Google Doc compartido → export .docx
+│   │   └── calidad.py                 # Detecta mojibake/páginas vacías y decide si seguir la cascada
 │   │
 │   ├── graph/
 │   │   ├── state.py                   # MentoriaState (TypedDict) — estado compartido de la red
@@ -265,18 +343,32 @@ poc_langgraph_mentoria/
 │   │   ├── debate_redactor_prompt.md  # Prompt para el Redactor en ronda de debate
 │   │   └── debate_evaluadores_prompt.md # Prompt para los Evaluadores en ronda de debate
 │   │
+│   ├── titulo.py                      # Politica de delimitacion del titulo + diagnostico determinista
+│   ├── citas.py                       # Vigencia de las fuentes (3 anios recomendado / 5 maximo)
+│   ├── verificaciones.py              # Hechos medidos que se inyectan a los agentes ya resueltos
+│   │
 │   └── rag/
-│       ├── embeddings.py              # Singleton HuggingFaceEmbeddings (all-MiniLM-L6-v2)
-│       ├── extractor.py               # Extracción de texto de PDFs con pdfplumber
-│       ├── tesis_store.py             # ChromaDB EphemeralClient — tesis del estudiante (por sesión)
+│       ├── embeddings.py              # Singleton HuggingFaceEmbeddings (multilingual-e5-small)
+│       ├── estructura.py              # Cascada que resuelve las secciones del proyecto
+│       ├── extractor.py               # Extraccion legacy de PDFs (la nueva vive en ingesta/)
+│       ├── tesis_store.py             # ChromaDB EphemeralClient — tesis del estudiante (por sesion)
 │       ├── library_store.py           # ChromaDB PersistentClient — biblioteca de libros
-│       └── vector_store.py            # recuperar_contexto(), recuperar_contexto_teorico()
+│       └── titulos_store.py           # Corpus de titulos UPAO: busqueda + estadistica de delimitacion
 │
-├── books/                             # PDFs de libros de metodología (pre-carga automática)
+├── scripts/
+│   ├── cosechar_titulos_upao.py       # Cosecha OAI-PMH del repositorio institucional
+│   └── indexar_titulos.py             # Construye el indice vectorial del corpus (una vez)
+│
+├── data/                              # Corpus cosechado (generado; ver seccion del corpus)
+│   ├── titulos_upao.jsonl             # ~270 tesis de la escuela de sistemas (filtrado)
+│   └── titulos_upao_sets.json         # Mapa de comunidades y colecciones del repositorio
+│
+├── books/                             # PDFs de libros de metodologia (pre-carga automatica)
 │   └── *.pdf
 │
-├── chroma_db/                         # ChromaDB persistente (generado automáticamente)
-│   └── biblioteca/                    # Índice vectorial de los libros
+├── chroma_db/                         # ChromaDB persistente (generado automaticamente)
+│   ├── biblioteca/                    # Indice vectorial de los libros
+│   └── titulos_upao/                  # Indice vectorial del corpus de titulos
 │
 ├── .env                               # Variables de entorno (NO subir a git)
 ├── .env.example                       # Plantilla de variables de entorno
@@ -301,10 +393,22 @@ poc_langgraph_mentoria/
 - Con Supabase configurado, la app abre la landing y el formulario de **iniciar sesión / crear cuenta**.
 - Sin Supabase configurado, la app entra en **modo invitado** y salta directo al chat (sin guardar historial).
 
-**2. Subir el PDF del estudiante**
-- Arrastra o selecciona el PDF de la tesis en la zona de subida del chat.
-- El sistema extrae el texto, detecta el índice y construye un ChromaDB efímero (en memoria).
-- (Opcional) Sube también la **rúbrica de tu jurado** en PDF para usarla en lugar de la rúbrica UPAO.
+**2. Entregar el proyecto**
+- Arrastra o selecciona el archivo: **PDF, Word (.docx), .txt o .md**.
+- O **pega el texto** directamente en el chat: si supera ~1 500 caracteres o 15 líneas se adjunta como
+  un chip `TXT` (con vista previa) en vez de volcarse en la conversación, y se indexa igual.
+- O importa un **Google Doc** compartido como «cualquiera con el enlace»; se exporta a .docx y entra
+  por la misma tubería que un Word, conservando sus encabezados.
+- El sistema extrae el texto, resuelve la estructura y construye un ChromaDB efímero (en memoria).
+- Si ya hay un proyecto cargado, el texto pegado no lo pisa: se ubica en su sección y se guarda como
+  versión de trabajo, y al evaluar se te pregunta cuál usar.
+
+**2b. Elegir qué evaluar (alcance)**
+- Al terminar la indexación aparece **«¿Qué parte de tu proyecto quieres que evalúe?»** con los 7
+  grupos de la rúbrica, premarcados según lo que ya tienes redactado.
+- Lo que dejes fuera no se califica y **no te resta**: la nota se informa sobre lo entregado, junto al
+  avance real («7 de 33 ítems»), para no confundirla con la nota de sustentación.
+- Se cambia cuando quieras con el botón **Alcance** de la cabecera del chat.
 
 **3. Pedir la revisión en el chat**
 - Escribe en lenguaje natural: «revisa mis objetivos», «evalúa todo el proyecto», o usa las acciones rápidas.
@@ -341,6 +445,41 @@ Supervisor → Humano   (cuando el texto está listo o se alcanza el límite)
 | **Auditor** | `nodes/auditor.py` | `llama-3.3-70b` temp=0.1 | Evalúa el texto contra los 33 ítems de la rúbrica oficial UPAO (escala 0–3). Salida estructurada Pydantic `AuditorOutput` |
 | **Metodólogo** | `nodes/metodologico.py` | `llama-3.3-70b` temp=0.2 | Evalúa el rigor científico y la coherencia entre secciones relacionadas del documento |
 | **Debate** | `nodes/debate.py` | `llama-3.3-70b` temp=0.3 | Intercambio argumentativo: Redactor defiende sus decisiones, Evaluadores responden con veredicto Pydantic (`VeredictoEvaluadores`). Actualiza `errores_rubrica` aceptando o manteniendo cada ítem |
+
+### Panel de título (`api/titulo_panel.py`)
+
+El título tiene su propio panel porque juega con reglas que ninguna otra sección
+tiene: límite duro de 20 palabras, delimitación espacio/tiempo **condicionada al tipo
+de estudio**, y un corpus de referencia propio. Un solo modelo que propone y se
+autoevalúa tiende a validar lo que acaba de escribir, así que cada rol trabaja sobre
+evidencia que el anterior no controla:
+
+| Agente | Rol |
+|---|---|
+| **Proponente** | Escribe 3 candidatos. Ve el proyecto por RAG, la política de delimitación de ESTE estudio y títulos reales del repositorio UPAO |
+| **Verificador de anclaje** | No propone: comprueba que cada institución, año, población o técnica del título esté en el proyecto. Lo que no esté, lo marca como inventado |
+| **Auditor** | Falla contra los ítems 1, 2 y 3 con el conteo de palabras y el diagnóstico de delimitación ya **medidos**. Puede devolver el trabajo al proponente una vez |
+
+Entre agente y agente corre un chequeo determinista (`backend/titulo.py`): las
+palabras se cuentan, no se opinan. Y cuando falta un dato — no se sabe la empresa, ni
+el periodo — el panel entrega un marcador explícito `[institución]` y lo pide, en
+lugar de rellenarlo con un nombre plausible.
+
+### Reglas transversales verificadas (`backend/verificaciones.py`)
+
+Dos comprobaciones que un LLM hace mal por naturaleza se resuelven fuera del modelo y
+se le entregan resueltas al auditor del grafo, al barrido de la revisión completa y al
+debate rápido:
+
+- **Delimitación del título** (`backend/titulo.py`) — el ítem 2 pide «variables,
+  espacio y tiempo», pero leerlo como «siempre lugar y año» produce títulos falsos. La
+  política decide si cada delimitación es EXIGIDA, RECOMENDADA u OPCIONAL según el
+  tipo, el diseño y el origen de los datos: un modelo entrenado sobre un dataset
+  público no se delimita por año; una encuesta a los trabajadores de una empresa, sí.
+- **Vigencia de las fuentes** (`backend/citas.py`) — se recomienda que las citas no
+  pasen de **3 años** y no deberían superar los **5**. Se cuentan los años reales de
+  las citas del texto y se clasifican, con la excepción explícita de obras seminales,
+  textos de metodología, normas técnicas y legislación, que no se penalizan por fecha.
 
 ---
 

@@ -68,6 +68,9 @@ class MentoriaState(TypedDict):
     programa:                 str
     modalidad:                str
     perfil_institucional:     Optional[str]
+    # Alcance declarado por el estudiante (qué partes de su proyecto quiere que se
+    # evalúen). Los agentes NO deben exigir ni penalizar lo que quede fuera.
+    alcance_declarado:        Optional[str]
     tipo_investigacion:       Optional[str]
     diseno:                   Optional[str]
 

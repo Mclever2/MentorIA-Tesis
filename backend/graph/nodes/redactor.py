@@ -16,11 +16,14 @@ Nota: la EVALUACIÓN contra la rúbrica la realiza el nodo Auditor, no el redact
 
 import logging
 import os
+import re
+import unicodedata
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from backend.reglas_seccion import es_seccion_de_fuentes, reglas_de_nucleo, reglas_para
 from ..state import MentoriaState
 from ._utils import invocar_con_backoff
 from ._rag_planner import obtener_contexto_dinamico
@@ -272,21 +275,31 @@ def make_nodo_redactor(llm: ChatOpenAI):
         else:
             instruccion_nucleo = "—"
 
-        # Regla institucional del título (p. ej. UPAO ≤ 20 palabras).
-        if es_titulo and es_upao:
-            regla_titulo = (
-                "REGLA INSTITUCIONAL UPAO PARA EL TÍTULO: el título DEBE tener MÁXIMO 20 PALABRAS "
-                "(contando conectores, artículos, preposiciones, fechas y siglas). Cuéntalas y, si excede, "
-                "reescríbelo más conciso SIN perder las variables, la unidad de análisis ni el enfoque. "
-                "Apóyate en la problemática, los objetivos, las variables y el diseño para que el título sea correcto."
-            )
-        elif es_titulo:
-            regla_titulo = (
-                "Para el TÍTULO, apóyate en la problemática, los objetivos, las variables y el diseño para "
-                "verificar que sea claro, específico y coherente con el estudio."
+        # Reglas del título. El límite de palabras no basta: lo que fallaba era la
+        # DELIMITACIÓN (variables · espacio · tiempo del ítem 2), que no es la misma
+        # para todos los estudios. `bloque_regla_titulo` la decide según el tipo, el
+        # diseño y el origen de los datos, y añade el diagnóstico medido del título actual.
+        if es_titulo:
+            from backend.titulo import bloque_regla_titulo
+            contexto_proyecto = " ".join(filter(None, [
+                (contexto_dinamico or "")[:2500],
+                (state.get("contexto_dependencias") or "")[:1500],
+                texto_base[:1500],
+            ]))
+            regla_titulo = bloque_regla_titulo(
+                tipo_investigacion=state.get("tipo_investigacion"),
+                diseno=state.get("diseno"),
+                contexto_proyecto=contexto_proyecto,
+                universidad=universidad if es_upao else "",
+                titulo_actual=texto_base,
             )
         else:
             regla_titulo = ""
+
+        # Vigencia de las fuentes: aplica a toda sección que cite (antecedentes, bases
+        # teóricas, referencias), no solo al título.
+        from backend.citas import analizar_vigencia, bloque_regla_citas
+        regla_citas = bloque_regla_citas(diagnostico=analizar_vigencia(texto_base))
 
         historial_debate_lista = state.get("historial_debate") or []
         if historial_debate_lista:
@@ -320,8 +333,20 @@ def make_nodo_redactor(llm: ChatOpenAI):
             "enfoque":                  enfoque,
             "brecha_meta":              brecha_meta,
             "regla_titulo":             regla_titulo or "—",
+            "regla_citas":              regla_citas,
             "instruccion_nucleo":       instruccion_nucleo,
             "contexto_secciones_relacionadas": "",
+            # Reglas de dominio de ESTA sección, compartidas con los paneles de
+            # asesoría. Sin esto el redactor contradecía al asesor: le reescribía
+            # los antecedentes con citas inventadas después de que el panel le
+            # hubiera explicado que eso es falta académica.
+            # En modo núcleo la sección se llama «Núcleo de coherencia (título · …)»:
+            # resolverla por nombre daba solo las reglas del título y dejaba la
+            # operacionalización sin las suyas.
+            "reglas_seccion": reglas_de_nucleo() if modo_nucleo else reglas_para(seccion),
+            # Lo que el estudiante NO puso a revisión no se reescribe ni se le
+            # reclama: reescribirlo sería ponerle palabras que no ha escrito.
+            "alcance_declarado": state.get("alcance_declarado") or "",
         }
 
         prompt_esc = ChatPromptTemplate.from_messages([
@@ -333,7 +358,9 @@ def make_nodo_redactor(llm: ChatOpenAI):
                 "**ERRORES CONFIRMADOS POR EL PANEL:**\n{errores_confirmados}\n\n"
                 "**BRECHA HACIA LA META (cierra esto):**\n{brecha_meta}\n\n"
                 "**MODO NÚCLEO:**\n{instruccion_nucleo}\n\n"
+                "**ALCANCE DECLARADO:**\n{alcance_declarado}\n\n"
                 "**REGLA DEL TÍTULO:**\n{regla_titulo}\n\n"
+                "**VIGENCIA DE LAS FUENTES:**\n{regla_citas}\n\n"
                 "**FEEDBACK METODOLÓGICO:**\n{observaciones_metodologicas}\n\n"
                 "**CONTEXTO RAG DE LIBROS:**\n{contexto_teorico}\n\n"
                 "**CONTEXTO DE OTRAS SECCIONES:**\n{contexto_dependencias}\n\n"
@@ -353,19 +380,67 @@ def make_nodo_redactor(llm: ChatOpenAI):
             logger.warning(f"[Redactor/Escritor] Falló: {exc} — usando fallback")
             texto_final = texto_base
 
-        # Red de seguridad determinista: título UPAO ≤ 20 palabras.
-        if es_titulo and es_upao and texto_final:
-            n_pal = _palabras_titulo(texto_final)
-            if n_pal > 20:
+        # Red de seguridad del PLAN DEL NÚCLEO: se comprueba que el texto entregado
+        # cubra lo que había que reescribir. Se observó al redactor saltarse el
+        # título —el subpunto peor calificado— y en cambio "mejorar" los objetivos y
+        # las hipótesis, que ya estaban en su máximo: el estudiante recibe cambios
+        # que no necesita y sigue sin el arreglo que sí necesitaba.
+        if modo_nucleo:
+            faltantes = _subpuntos_omitidos(state.get("nucleo_plan"), texto_final)
+            if faltantes:
                 aviso = (
-                    f"**Atención:** el título propuesto tiene {n_pal} palabras; UPAO exige "
-                    "máximo 20 (incluyendo conectores y fechas). Recórtalo conservando las "
-                    "variables y la unidad de análisis."
+                    "Estos subpuntos debían reescribirse y no aparecen en el texto propuesto: "
+                    + "; ".join(faltantes)
+                    + ". Su nota original se mantiene: pide la revisión de nuevo o trabájalos aparte."
                 )
                 sugerencias_escritor = (
                     f"{sugerencias_escritor}\n\n{aviso}" if sugerencias_escritor else aviso
                 )
-                logger.info(f"[Redactor] Título UPAO con {n_pal} palabras (>20) — aviso añadido")
+                logger.warning(f"[Redactor/Núcleo] Subpuntos omitidos: {faltantes}")
+
+        # Red de seguridad determinista de las FUENTES: al reescribir antecedentes o
+        # marco teórico, el modelo tiende a "completar" con estudios que suenan
+        # bien y no existen. Aquí se compara contra el texto original: toda cita
+        # que no estuviera ya, se sustituye por un marcador. Una referencia
+        # inventada en una tesis es falta académica, no un desliz de estilo.
+        if es_seccion_de_fuentes(seccion):
+            from api.antecedentes import citas_inventadas
+
+            previas = set(citas_inventadas(texto_base))
+            nuevas = citas_inventadas(texto_final, permitidas=previas)
+            if nuevas:
+                for cita in nuevas:
+                    texto_final = texto_final.replace(
+                        cita, "[antecedente pendiente: verifica esta fuente]"
+                    )
+                aviso = (
+                    "Se detectaron y neutralizaron "
+                    f"{len(nuevas)} referencia(s) que no estaban en tu texto original "
+                    f"({', '.join(nuevas[:3])}). No las uses: búscalas y verifícalas tú antes de "
+                    "incorporarlas."
+                )
+                sugerencias_escritor = (
+                    f"{sugerencias_escritor}\n\n{aviso}" if sugerencias_escritor else aviso
+                )
+                logger.warning(
+                    f"[Redactor] {len(nuevas)} cita(s) inventada(s) neutralizadas en «{seccion}»"
+                )
+
+        # Red de seguridad determinista del título: límite de palabras Y delimitación.
+        # El LLM puede argumentar bien y aun así entregar un título de 24 palabras o sin
+        # la unidad de análisis; esto se verifica fuera del modelo.
+        if es_titulo and texto_final:
+            avisos = _avisos_titulo(
+                texto_final,
+                tipo_investigacion=state.get("tipo_investigacion"),
+                diseno=state.get("diseno"),
+                contexto_proyecto=(state.get("contexto_dependencias") or "")[:2000],
+                es_upao=es_upao,
+            )
+            if avisos:
+                sugerencias_escritor = (
+                    f"{sugerencias_escritor}\n\n{avisos}" if sugerencias_escritor else avisos
+                )
 
         notas_na = _notas_na_tipo(state)
         if notas_na:
@@ -394,17 +469,85 @@ def _es_seccion_titulo(seccion: str) -> bool:
 
 def _palabras_titulo(texto: str) -> int:
     """Cuenta palabras del título, quitando una etiqueta inicial tipo «Título: …»."""
-    import re
-    t = (texto or "").strip()
-    t = re.sub(r'(?i)^\s*t[íi]tulo[^\n:]*[:\n]', ' ', t, count=1)
-    return len(re.findall(r"\S+", t))
+    from backend.titulo import contar_palabras_titulo
+    return contar_palabras_titulo(texto)
+
+
+def _avisos_titulo(
+    texto: str,
+    tipo_investigacion: str | None,
+    diseno: str | None,
+    contexto_proyecto: str,
+    es_upao: bool,
+) -> str:
+    """Avisos VERIFICADOS sobre el título entregado: extensión y delimitación faltante.
+
+    Se comprueba fuera del LLM porque son las dos cosas que el modelo daba por buenas
+    con más frecuencia: entregaba títulos de más de 20 palabras y, sobre todo, títulos
+    sin espacio ni tiempo en estudios que sí los exigían.
+    """
+    from backend.titulo import MAX_PALABRAS_UPAO, diagnosticar_titulo, politica_delimitacion
+
+    diag = diagnosticar_titulo(texto)
+    pol = politica_delimitacion(tipo_investigacion, diseno, contexto_proyecto)
+    avisos: list[str] = []
+
+    if es_upao and diag.excede_limite:
+        avisos.append(
+            f"**Atención:** el título propuesto tiene {diag.n_palabras} palabras; UPAO exige "
+            f"máximo {MAX_PALABRAS_UPAO} (incluyendo conectores y fechas). Recórtalo conservando "
+            "las variables y la unidad de análisis."
+        )
+
+    if pol.espacio == "exigida" and not diag.tiene_espacio:
+        avisos.append(
+            "**Falta la delimitación espacial:** el ítem 2 pide que el título articule el espacio, "
+            f"y este estudio la exige — {pol.motivo_espacio}. Añade la institución, el sector o el "
+            "ámbito territorial; si aún no lo sabes, deja «[institución]» y complétalo, pero no lo inventes."
+        )
+    if pol.tiempo == "exigida" and not diag.tiene_tiempo:
+        avisos.append(
+            "**Falta la delimitación temporal:** este estudio la exige — "
+            f"{pol.motivo_tiempo}. Añade el año o el rango de años del periodo de referencia."
+        )
+    # El caso inverso, que era el otro error: meter un año donde no delimita nada.
+    if pol.tiempo == "opcional" and diag.tiene_tiempo:
+        avisos.append(
+            "**Revisa el año del título:** para este tipo de estudio la delimitación temporal es "
+            f"opcional — {pol.motivo_tiempo}. Consérvalo solo si ese año corresponde de verdad a los "
+            "datos; si no, quítalo y gana palabras para las variables."
+        )
+
+    if avisos:
+        logger.info(f"[Redactor] Título con {len(avisos)} aviso(s) determinista(s)")
+    return "\n\n".join(avisos)
+
+
+def _subpuntos_omitidos(plan: dict | None, texto: str) -> list[str]:
+    """Subpuntos que el plan mandaba reescribir y no aparecen en el texto entregado.
+
+    Se compara por el nombre del subpunto sin su numeración y sin tildes, porque el
+    modelo reescribe «### Título» donde el índice dice «1 Título»; exigir el nombre
+    literal daría falsos positivos en cada documento.
+    """
+    reescribir = (plan or {}).get("reescribir") or []
+    if not reescribir or not texto:
+        return []
+
+    def _clave(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+        s = re.sub(r"^\s*[\divxlc]+(\.[\d]+)*[.)]?\s+", "", s)   # quita la numeración
+        return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+    cuerpo = _clave(texto)
+    return [s for s in reescribir if (k := _clave(s)) and k not in cuerpo]
 
 
 def _instruccion_nucleo(plan: dict | None) -> str:
-    """Instrucción del modo NÚCLEO: MEJORAR de verdad lo que no es 5/5 y JUSTIFICAR lo perfecto.
+    """Instrucción del modo NÚCLEO: MEJORAR lo que no llega a su máximo y JUSTIFICAR lo que sí.
 
     `plan = {"reescribir": [secciones (nota < máx)],
-             "observar":   [{"seccion","puntaje","maximo","razones"} (ya en 5/5)],
+             "observar":   [{"seccion","puntaje","maximo","razones"} (ya en su máximo)],
              "razones_reescribir": {seccion: [razones]}}`.
     Sin plan → reescribir todos los subpuntos.
     """
@@ -426,7 +569,7 @@ def _instruccion_nucleo(plan: dict | None) -> str:
     for s in reescribir:
         falta = "; ".join(r for r in (razones_re.get(s) or []) if r)
         lin_re.append(f"- {s}" + (f" → qué cerrar: {falta}" if falta else ""))
-    lin_re_txt = "\n".join(lin_re) or "- (ninguno: todos están en 5/5)"
+    lin_re_txt = "\n".join(lin_re) or "- (ninguno: todos alcanzan ya su nota máxima)"
 
     lin_obs = []
     for o in observar:
@@ -454,22 +597,28 @@ def _instruccion_nucleo(plan: dict | None) -> str:
 
     return (
         "Estás trabajando el NÚCLEO DE COHERENCIA (título · problema · objetivos · hipótesis · "
-        "variables). TODO va en `texto_redactado`, cada subpunto bajo su encabezado markdown "
-        "`### <nombre>` y conteniendo SOLO su propio contenido (no mezcles subpuntos ni agregues texto ajeno).\n\n"
+        "variables). TODO va en `texto_redactado`.\n"
+        "ENCABEZADOS OBLIGATORIOS: usa EXACTAMENTE los nombres de las listas A y B, copiados tal cual "
+        "y precedidos de `### `. No inventes otros encabezados, no cambies su numeración, no añadas "
+        "subpuntos que no estén en las listas y no omitas ninguno. Cada bloque contiene SOLO su propio "
+        "contenido.\n\n"
         "A) MEJÓRALOS DE VERDAD (su nota NO es la máxima). Entrega el texto del subpunto YA MEJORADO, "
-        "listo para entregar, APLICANDO los cambios (no solo describiéndolos), incluso los menores "
-        "(mayúsculas/minúsculas, tildes, puntuación, una palabra más precisa). Cierra exactamente las "
-        "brechas indicadas:\n"
+        "listo para entregar, APLICANDO los cambios (no solo describiéndolos). Cada cambio tiene que "
+        "cerrar una de las brechas indicadas abajo: si un retoque no cierra ninguna, NO lo hagas — "
+        "cambiar palabras correctas por sinónimos no sube la nota y le borra su voz al estudiante. "
+        "Cierra exactamente estas brechas:\n"
         f"{lin_re_txt}\n\n"
-        "B) NO los reescribas: YA están en la nota máxima. Para cada uno, bajo su encabezado, escribe una "
-        "línea «✓ Ya cumple (nota)» y FUNDAMENTA, apoyándote en los LIBROS DE METODOLOGÍA del CONTEXTO RAG, "
-        "POR QUÉ cumple el criterio (menciona la fuente de forma natural). No inventes citas ni autores:\n"
+        "B) NO los reescribas: YA tienen la nota máxima de su criterio. Reproduce su texto SIN TOCARLO "
+        "y añade debajo una línea «✓ Ya cumple (nota)» que FUNDAMENTE, apoyándote en los LIBROS DE "
+        "METODOLOGÍA del CONTEXTO RAG, POR QUÉ cumple el criterio (menciona la fuente de forma natural). "
+        "No inventes citas ni autores. Si crees que aun así mejorarían, dilo en `recomendaciones`, "
+        "nunca reescribiéndolos:\n"
         f"{lin_obs_txt}\n\n"
         "En `recomendaciones` entrega una LISTA NUMERADA de los CAMBIOS CONCRETOS que aplicaste en cada "
-        "subpunto reescrito (p. ej. «1. Título: se precisó “X” por “Y” para articular la relación entre "
-        "variables; 2. Problema: se añadió la conexión entre los factores y su impacto»). No incluyas en esa "
-        "lista los subpuntos que ya estaban en 5/5. Respeta la TRAZABILIDAD entre subpuntos y con el "
-        "tipo/diseño; no fuerces lo que el tipo no requiere."
+        "subpunto reescrito, y de qué brecha cierra cada uno (p. ej. «1. Título: se precisó “X” por “Y” "
+        "para articular la relación entre variables — cierra el ítem 2»). No incluyas ahí los subpuntos "
+        "de la lista B. Respeta la TRAZABILIDAD entre subpuntos y con el tipo/diseño; no fuerces lo que "
+        "el tipo no requiere."
         + bloque_fb
     )
 

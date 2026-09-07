@@ -51,10 +51,17 @@
   html {
     -webkit-font-smoothing: antialiased;
     scroll-behavior: smooth;
+    overflow-x: hidden;
   }
 
   body {
     @apply bg-background text-foreground font-sans;
+    overflow-x: hidden;
+  }
+
+  #root {
+    overflow-x: hidden;
+    min-height: 100vh;
   }
 }
 
@@ -64,6 +71,20 @@
   }
   .dark .glass {
     @apply bg-zinc-900/70 backdrop-blur-md border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.35)];
+  }
+
+  /*
+   * Misma estética que .glass pero SIN backdrop-filter, para tarjetas que viven
+   * dentro de un contenedor con scroll. El navegador rehace la captura del fondo
+   * desenfocado en cada frame y, al deslizar rápido, esa captura llega tarde: las
+   * tarjetas se ven superpuestas / con estela. Al subir la opacidad del fondo el
+   * resultado visual es prácticamente idéntico y el scroll queda limpio.
+   */
+  .glass-scroll {
+    @apply bg-white/90 border border-black/[0.06] shadow-[0_8px_30px_rgba(0,0,0,0.06)];
+  }
+  .dark .glass-scroll {
+    @apply bg-zinc-900/90 border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.35)];
   }
   .hairline {
     box-shadow: 0 0 0 0.5px rgba(60, 60, 67, 0.22);
