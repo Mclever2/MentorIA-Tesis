@@ -131,7 +131,7 @@ function Puntaje({
     : ratio >= 0.5 ? "text-[#FF9500]"
     : "text-destructive";
   return (
-    <div className={cn("text-center rounded-2xl px-3 py-1.5", destacado && "glass")}>
+    <div className={cn("text-center rounded-2xl px-3 py-1.5", destacado && "glass-scroll")}>
       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{etiqueta}</div>
       <div className={cn("font-semibold tabular-nums", color)}>
         {valor != null ? Math.round(valor) : "—"}
@@ -151,7 +151,7 @@ function Tarjeta({
   children: React.ReactNode;
 }) {
   return (
-    <section className="glass rounded-3xl p-5">
+    <section className="glass-scroll rounded-3xl p-5">
       <h2 className="font-semibold flex items-center gap-2 mb-3">
         {icono}
         {titulo}

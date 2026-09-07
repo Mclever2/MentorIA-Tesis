@@ -8,10 +8,25 @@ import {
   Square,
 } from "lucide-react";
 
+import AdjuntoChip from "@/components/chat/AdjuntoChip";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useAutoResizeTextarea } from "@/hooks/use-auto-resize-textarea";
 import { cn } from "@/lib/utils";
+import type { AdjuntoTexto } from "@/types";
+
+/** Formatos que el backend sabe indexar (ver backend/ingesta). */
+export const FORMATOS_ACEPTADOS =
+  ".pdf,.docx,.txt,.md,.markdown,application/pdf," +
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown";
+
+// A partir de aquí un pegado deja de ser un mensaje y pasa a ser un documento:
+// volcarlo en la burbuja hacía ilegible el chat. Se adjunta como TXT.
+const UMBRAL_PEGADO_CHARS = 1500;
+const UMBRAL_PEGADO_LINEAS = 15;
+
+let _idAdjunto = 0;
+const nuevoIdAdjunto = () => `adj${Date.now()}_${_idAdjunto++}`;
 
 export const NIVELES_ITERACION = [
   { valor: 1, nombre: "Rápido", detalle: "1 iteración · ~3 min" },
@@ -24,7 +39,7 @@ interface ChatInputProps {
   deshabilitado?: boolean;
   iteraciones: number;
   onIteraciones: (n: number) => void;
-  onEnviar: (texto: string) => void;
+  onEnviar: (texto: string, adjuntos: AdjuntoTexto[]) => void;
   onDetener: () => void;
   onArchivo: (archivo: File) => void;
 }
@@ -39,6 +54,7 @@ export default function ChatInput({
   onArchivo,
 }: ChatInputProps) {
   const [mensaje, setMensaje] = useState("");
+  const [adjuntos, setAdjuntos] = useState<AdjuntoTexto[]>([]);
   const [menuAbierto, setMenuAbierto] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const { textareaRef, adjustHeight } = useAutoResizeTextarea({
@@ -47,17 +63,54 @@ export default function ChatInput({
   });
 
   const nivel = NIVELES_ITERACION.find((n) => n.valor === iteraciones) ?? NIVELES_ITERACION[1];
-  const puedeEnviar = mensaje.trim().length > 0 && !ejecutando && !deshabilitado;
+  const puedeEnviar =
+    (mensaje.trim().length > 0 || adjuntos.length > 0) && !ejecutando && !deshabilitado;
 
   function enviar() {
     if (!puedeEnviar) return;
-    onEnviar(mensaje.trim());
+    onEnviar(mensaje.trim(), adjuntos);
     setMensaje("");
+    setAdjuntos([]);
     adjustHeight(true);
+  }
+
+  /**
+   * Un pegado grande se convierte en adjunto en vez de entrar al textarea.
+   * Así el estudiante puede pegar una sección entera para que se indexe sin
+   * dejar un muro de texto en la conversación.
+   */
+  function alPegar(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const pegado = e.clipboardData.getData("text");
+    if (!pegado) return;
+    const lineas = pegado.split(/\r\n|\r|\n/).length;
+    if (pegado.length < UMBRAL_PEGADO_CHARS && lineas < UMBRAL_PEGADO_LINEAS) return;
+
+    e.preventDefault();
+    setAdjuntos((prev) => [
+      ...prev,
+      {
+        id: nuevoIdAdjunto(),
+        nombre: `Texto pegado ${prev.length + 1}`,
+        texto: pegado,
+        lineas,
+        chars: pegado.length,
+      },
+    ]);
   }
 
   return (
     <div className="relative glass rounded-3xl">
+      {adjuntos.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-4 pt-3">
+          {adjuntos.map((a) => (
+            <AdjuntoChip
+              key={a.id}
+              adjunto={a}
+              onQuitar={() => setAdjuntos((prev) => prev.filter((x) => x.id !== a.id))}
+            />
+          ))}
+        </div>
+      )}
       <Textarea
         ref={textareaRef}
         value={mensaje}
@@ -66,6 +119,7 @@ export default function ChatInput({
           setMensaje(e.target.value);
           adjustHeight();
         }}
+        onPaste={alPegar}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
@@ -75,7 +129,9 @@ export default function ChatInput({
         placeholder={
           ejecutando
             ? "Los agentes están trabajando…"
-            : "Pide una revisión: «revisa mis objetivos», «evalúa todo el proyecto»…"
+            : adjuntos.length
+              ? "Añade una instrucción para tu texto adjunto (o envíalo tal cual)…"
+              : "Pide una revisión, o pega el texto de tu proyecto para indexarlo…"
         }
         className={cn(
           "w-full px-5 py-3.5 resize-none border-none rounded-3xl",
@@ -91,7 +147,7 @@ export default function ChatInput({
           <input
             ref={fileRef}
             type="file"
-            accept="application/pdf"
+            accept={FORMATOS_ACEPTADOS}
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
@@ -102,7 +158,7 @@ export default function ChatInput({
           <Button
             variant="ghost"
             size="icon"
-            title="Subir PDF (tesis o rúbrica)"
+            title="Subir tu proyecto (PDF, Word o texto)"
             className="rounded-full text-muted-foreground hover:text-foreground"
             onClick={() => fileRef.current?.click()}
           >
@@ -122,7 +178,8 @@ export default function ChatInput({
             {menuAbierto && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setMenuAbierto(false)} />
-                <div className="absolute bottom-full mb-2 left-0 z-20 w-60 bg-zinc-900 border border-zinc-800 rounded-2xl p-1.5 shadow-xl">                  <p className="px-3 pt-1.5 pb-1 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+                <div className="absolute bottom-full mb-2 left-0 z-20 w-60 bg-card text-card-foreground border border-border rounded-2xl p-1.5 shadow-xl">
+                  <p className="px-3 pt-1.5 pb-1 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
                     Profundidad de revisión
                   </p>
                   {NIVELES_ITERACION.map((n) => (

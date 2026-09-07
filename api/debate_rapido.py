@@ -128,16 +128,7 @@ class EstadoDebate(TypedDict, total=False):
     seccion: str
     enfoque: str
     estado_proyecto: str
-    aviso_no_aplica: str
-    tipo_declarado: bool
-    tesis_similares: str
-    tesis_similares_lista: list
-    aviso_solucion_primero: str
-    aviso_no_se: str
-    aviso_etico: str
-    # triaje
-    modo: str
-    justificacion_triaje: str
+    reglas_verificadas: str
     # debate (memoria compartida)
     debate_memory: list
     # entregable
@@ -631,6 +622,9 @@ solo porque no aparece en el primer fragmento):
 CRITERIOS DE LA RÚBRICA A SATISFACER:
 {criterios_rubrica}
 
+REGLAS DURAS Y MEDICIONES VERIFICADAS (dalas por ciertas; no las recalcules):
+{reglas_verificadas}
+
 FRAGMENTOS DE LIBROS:
 {contexto_libros}
 
@@ -679,6 +673,9 @@ BASE REAL DEL ESTUDIANTE:
 CRITERIOS DE LA RÚBRICA A SATISFACER:
 {criterios_rubrica}
 
+REGLAS DURAS Y MEDICIONES VERIFICADAS (dalas por ciertas; no las recalcules):
+{reglas_verificadas}
+
 FRAGMENTOS DE LIBROS:
 {contexto_libros}
 
@@ -711,7 +708,10 @@ BASE REAL DEL ESTUDIANTE:
 CRITERIOS DE LA RÚBRICA:
 {criterios_rubrica}
 
-DEBATE COMPLETO DE LOS REDACTORES:
+REGLAS DURAS Y MEDICIONES VERIFICADAS (dalas por ciertas; no las recalcules):
+{reglas_verificadas}
+
+DEBATE COMPLETO DE LOS METODÓLOGOS:
 {historial_panel}
 
 REGLAS DEL ENTREGABLE:
@@ -881,7 +881,10 @@ MATERIAL DEL ANÁLISIS INTERNO:
 - CRITERIOS DE LA RÚBRICA RELEVANTES:
 {criterios_rubrica}
 
-- SÍNTESIS DEL ANÁLISIS DEL PANEL:
+- REGLAS DURAS Y MEDICIONES VERIFICADAS:
+{reglas_verificadas}
+
+- SÍNTESIS DEL ANÁLISIS:
 {historial_panel}
 
 {aviso_no_aplica}"""
@@ -942,8 +945,19 @@ def _nodo_recuperacion(state: EstadoDebate) -> dict:
         except Exception as exc:
             logger.warning(f"[mini_grafo] No se pudo detectar el tipo: {exc}")
 
-    _similares = tesis_similares(f"{consulta} {tesis[:400]}")
-    _motivo = requiere_resguardo_etico(consulta, tesis)
+        # El alcance viaja junto al enfoque porque comparten sitio en los tres
+        # prompts del debate: así el mini-grafo tampoco reclama capítulos que el
+        # estudiante todavía no ha declarado como terminados.
+        try:
+            from backend.alcance import bloque_prompt
+            bloque = bloque_prompt(doc)
+            if bloque:
+                enfoque = "\n\n".join(p for p in (enfoque, bloque) if p)
+        except Exception as exc:                               # noqa: BLE001
+            logger.warning(f"[debate_rapido] No se pudo aplicar el alcance: {exc}")
+
+    reglas = _reglas_verificadas(seccion or "", tesis, doc)
+
     logger.info(
         f"[mini_grafo] Recuperación lista | sección: {seccion or '—'} | "
         f"rúbrica: {'sí' if criterios else 'no'} | tesis: {len(tesis)} chars"
@@ -961,21 +975,7 @@ def _nodo_recuperacion(state: EstadoDebate) -> dict:
         "seccion": seccion or "",
         "enfoque": enfoque,
         "estado_proyecto": estado,
-        "aviso_no_aplica": nota_no_aplica(seccion),
-        "tipo_declarado": tipo_declarado,
-        # Coteja la idea del estudiante contra las tesis REALES ya aprobadas del programa,
-        # para poder avisarle si está a punto de duplicar una.
-        "tesis_similares": bloque_tesis_similares(_similares),
-        "tesis_similares_lista": _similares,
-        # Patrón «tengo la tecnología, busco dónde aplicarla»: se detecta de forma
-        # determinista para que la reconducción no dependa de que el LLM se acuerde.
-        "aviso_solucion_primero": (
-            AVISO_SOLUCION_PRIMERO if detectar_solucion_primero(consulta) else ""
-        ),
-        # El estudiante dijo «no sé» a algo determinante: hay que ensenarle, no seguir de largo.
-        "aviso_no_se": AVISO_NO_SE if detectar_no_se(consulta) else "",
-        # Personas o datos sensibles -> Art. 71: comite de etica y consentimiento informado.
-        "aviso_etico": (aviso_etico(_motivo) if _motivo else ""),
+        "reglas_verificadas": reglas,
         "debate_memory": [],
         "problemas": [],
         "advertencias": [],
@@ -983,258 +983,43 @@ def _nodo_recuperacion(state: EstadoDebate) -> dict:
     }
 
 
-def _historial_txt(historial: list[dict] | None, turnos: int = 8) -> str:
-    """Rinde la conversación para los prompts SIN mutilar al estudiante.
+def _reglas_verificadas(seccion: str, texto: str, doc) -> str:
+    """Reglas duras + mediciones que el panel no debe estimar a ojo.
 
-    Antes se truncaba todo a 200 caracteres, y como las respuestas del estudiante
-    son largas («1. …Respuesta: …» × 7), lo que llegaba al modelo era el arranque
-    de la lista de preguntas del propio mentor: parecía que no había contestado
-    nada. Los turnos del ESTUDIANTE son la fuente de datos y van íntegros; los del
-    mentor son contexto y se recortan, que además son los que inflan el prompt.
+    Siempre entra la vigencia de las fuentes (aplica a cualquier sección que cite).
+    Si la sección es el título, entra además su política de delimitación y el
+    conteo real de palabras: es lo que se le escapaba al panel genérico, que trataba
+    el título como un párrafo más.
     """
-    lineas = []
-    for t in (historial or [])[-turnos:]:
-        contenido = (t.get("contenido") or "").strip()
-        if not contenido:
-            continue
-        if t.get("rol") == "user":
-            lineas.append(f"Estudiante: {contenido[:2000]}")
-        else:
-            lineas.append(f"MentorIA: {contenido[:300]}")
-    return "\n".join(lineas) or "(sin turnos previos)"
+    from backend.citas import analizar_vigencia, bloque_regla_citas
+
+    partes: list[str] = []
+    s = (seccion or "").lower()
+
+    if "título" in s or "titulo" in s:
+        from backend.titulo import bloque_regla_titulo
+        tipo, diseno = "cuantitativa", ""
+        universidad = ""
+        if doc is not None:
+            universidad = getattr(doc, "universidad", "") or ""
+            try:
+                from .tipo_investigacion import obtener_tipo_diseno
+                tipo, diseno = obtener_tipo_diseno(doc)
+            except Exception as exc:                      # noqa: BLE001
+                logger.warning(f"[debate_rapido] No se pudo detectar el tipo: {exc}")
+        partes.append(bloque_regla_titulo(
+            tipo_investigacion=tipo,
+            diseno=diseno,
+            contexto_proyecto=texto,
+            universidad=universidad,
+            titulo_actual=texto,
+        ))
+
+    partes.append(bloque_regla_citas(diagnostico=analizar_vigencia(texto)))
+    return "\n\n".join(partes)
 
 
-def _nodo_triaje(state: EstadoDebate) -> dict:
-    """Decide la ruta: aclarar duda, preguntar antes de redactar, o redactar."""
-    from .ficha import es_meta_pregunta, hay_base_para_redactar
-
-    consulta = state.get("consulta", "")
-    ficha = state.get("ficha") or {}
-    previas = state.get("elicitaciones_previas", 0)
-
-    # ATAJO DETERMINISTA. «¿sabes lo que te dije?» es justo el turno en que el
-    # estudiante ya perdió la confianza: no puede depender de que el LLM acierte
-    # la clasificación. Se le devuelve su ficha, sin panel y sin preguntas.
-    if es_meta_pregunta(consulta):
-        logger.info("[mini_grafo/triaje] Meta-pregunta detectada → modo 'memoria'")
-        return {"modo": "memoria", "justificacion_triaje": "pregunta por lo ya dicho"}
-
-    chain = ChatPromptTemplate.from_messages([
-        ("system", _PROMPT_TRIAJE),
-        ("human", "Clasifica qué necesita el estudiante."),
-    ]) | llm_rapido(temperatura=0.0).with_structured_output(Triaje)
-
-    inputs = {
-        "consulta": consulta,
-        "seccion": state.get("seccion") or "(no resuelta)",
-        "ficha_txt": state.get("ficha_txt", ""),
-        "contexto_tesis": state.get("contexto_tesis", ""),
-        "estado_proyecto": state.get("estado_proyecto", ""),
-        "historial_txt": _historial_txt(state.get("historial")),
-    }
-    try:
-        out = _invocar(chain, inputs)
-        modo, just = out.modo, out.justificacion
-    except Exception as exc:
-        logger.warning(f"[mini_grafo/triaje] Falló: {exc}")
-        # Degradación segura: sin base útil preferimos preguntar antes que inventar.
-        # La ficha cuenta como base tanto como el texto recuperado del PDF.
-        base = state.get("contexto_tesis") or ""
-        modo = (
-            "redaccion"
-            if len(base) > _MIN_BASE_UTIL or hay_base_para_redactar(ficha)
-            else "elicitacion"
-        )
-        just = "(triaje por defecto)"
-
-    # CORTACIRCUITOS. Dos tandas de preguntas seguidas y el estudiante sigue sin
-    # su entregable: insistir una tercera vez no le va a sacar más información,
-    # solo lo va a hartar. Se redacta con lo que hay y lo que falte se marca como
-    # asunción explícita, que él puede corregir en una línea.
-    if modo == "elicitacion" and previas >= _MAX_ELICITACIONES_SEGUIDAS:
-        logger.info(
-            f"[mini_grafo/triaje] {previas} elicitaciones seguidas → fuerzo 'redaccion' "
-            "con asunciones explícitas (cortacircuitos anti-bucle)."
-        )
-        modo = "redaccion"
-        just = f"cortacircuitos: ya se le preguntó {previas} veces seguidas"
-
-    # La ficha ya alcanza para redactar: no se vuelve a preguntar aunque el
-    # clasificador se haya puesto exigente.
-    elif modo == "elicitacion" and hay_base_para_redactar(ficha):
-        logger.info("[mini_grafo/triaje] La ficha ya da base → 'redaccion' en vez de repreguntar.")
-        modo = "redaccion"
-        just = "la ficha del proyecto ya tiene base suficiente"
-
-    logger.info(f"[mini_grafo/triaje] modo={modo} | {just}")
-    return {"modo": modo, "justificacion_triaje": just}
-
-
-def _ruta_triaje(state: EstadoDebate) -> str:
-    modo = state.get("modo", "duda")
-    if modo == "memoria":
-        return "memoria"
-    if modo == "ideacion":
-        return "ideador"
-    if modo == "elicitacion":
-        return "elicitador"
-    if modo == "redaccion":
-        return "redactor_metodologico"
-    return "asesor"
-
-
-def _nodo_memoria(state: EstadoDebate) -> dict:
-    """Responde «¿sabes lo que te dije?» devolviéndole su ficha, sin LLM.
-
-    Es determinista a propósito: no puede inventar un dato que el estudiante no
-    dio ni olvidar uno que sí dio, que es exactamente lo que se le está
-    reprochando al sistema en ese turno.
-    """
-    from .ficha import resumen_para_estudiante
-
-    contenido = resumen_para_estudiante(state.get("ficha"))
-    logger.info("[mini_grafo/memoria] Devuelvo la ficha registrada (sin llamada al LLM).")
-    return {"respuesta_final": contenido, "texto_sintetizado": "", "recomendaciones": contenido}
-
-
-def _nodo_elicitador(state: EstadoDebate) -> dict:
-    """Sin base suficiente: pregunta con criterio en vez de inventar."""
-    chain = ChatPromptTemplate.from_messages([
-        ("system", _PROMPT_ELICITADOR),
-        ("human", "Elabora las preguntas que necesitas para poder redactarlo bien."),
-    ]) | llm_rapido(temperatura=0.3).with_structured_output(Elicitacion)
-
-    inputs = {
-        "marco": marco_para("elicitador"),
-        "enfoque": state.get("enfoque", "") or "(el estudiante aún no declaró tipo ni diseño de investigación)",
-        "aviso_no_aplica": state.get("aviso_no_aplica", ""),
-        "aviso_no_se": state.get("aviso_no_se", ""),
-        "aviso_etico": state.get("aviso_etico", ""),
-        "tesis_similares": state.get("tesis_similares", ""),
-        "consulta": state.get("consulta", ""),
-        # Sin estos dos el elicitador redactaba las preguntas a ciegas y repetía
-        # las mismas siete tanda tras tanda, aunque el estudiante ya las hubiera
-        # contestado en el turno anterior.
-        "ficha_txt": state.get("ficha_txt", ""),
-        "historial_txt": _historial_txt(state.get("historial")),
-        "contexto_tesis": state.get("contexto_tesis", ""),
-        "criterios_rubrica": state.get("criterios_rubrica", ""),
-    }
-    try:
-        out = _invocar(chain, inputs)
-        preguntas = _garantizar_tipo_y_diseno(list(out.preguntas or []), state)
-        contenido = _formatear_elicitacion(out, preguntas)
-    except Exception as exc:
-        logger.warning(f"[mini_grafo/elicitador] Falló: {exc}")
-        contenido = ""
-    memoria = list(state.get("debate_memory") or [])
-    memoria.append({"agente": "elicitador", "contenido": contenido})
-    # La elicitación NO produce texto de tesis: solo preguntas.
-    return {"debate_memory": memoria, "texto_sintetizado": "", "recomendaciones": contenido}
-
-
-def _garantizar_tipo_y_diseno(preguntas: list, state: EstadoDebate) -> list:
-    """Si el estudiante no declaró tipo/diseño, asegura que se le pregunten POR SEPARADO.
-
-    El modelo tiende a fundirlas en una sola pregunta («¿aplicada, experimental,
-    descriptiva?»), y entonces el estudiante contesta «aplicada» y se queda sin
-    declarar el diseño — que es lo que decide si necesita hipótesis y medición
-    pre/post. Como no se puede confiar en el prompt para esto, se comprueba aquí.
-
-    ⚠️ Pero la inyección solo procede si el dato NO está ya en la ficha. Antes esto
-    era una segunda fuente de repetición, independiente del LLM: el estudiante
-    escribía «Tipo: Aplicada. Diseño: Cuasi-experimental» y este bloque le volvía a
-    preguntar las dos cosas, porque solo miraba el PDF (`tipo_declarado`).
-    """
-    ficha = state.get("ficha") or {}
-    tipo_en_ficha = bool((ficha.get("tipo_investigacion") or "").strip())
-    diseno_en_ficha = bool((ficha.get("diseno") or "").strip())
-
-    if state.get("tipo_declarado") or (tipo_en_ficha and diseno_en_ficha):
-        return preguntas
-
-    texto = " ".join(f"{p.pregunta} {p.opciones}" for p in preguntas).lower()
-    texto = _sin_tildes_local(texto)
-
-    if not diseno_en_ficha and not re.search(r"dise[nñ]o|pre-?experimental|cuasi|correlacional", texto):
-        preguntas.append(PreguntaElicitacion(**PREGUNTA_DISENO))
-        logger.info("[mini_grafo/elicitador] Inyectada la pregunta de DISEÑO (faltaba).")
-    if not tipo_en_ficha and not re.search(r"aplicada|b[áa]sica|orientaci[óo]n|finalidad", texto):
-        preguntas.append(PreguntaElicitacion(**PREGUNTA_TIPO_INVESTIGACION))
-        logger.info("[mini_grafo/elicitador] Inyectada la pregunta de TIPO (faltaba).")
-    return preguntas
-
-
-def _sin_tildes_local(texto: str) -> str:
-    import unicodedata
-    return unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode("ascii")
-
-
-def _nodo_ideador(state: EstadoDebate) -> dict:
-    """Sin tema (o solo con tecnologías): aterriza opciones reales del programa."""
-    chain = ChatPromptTemplate.from_messages([
-        ("system", _PROMPT_IDEADOR),
-        ("human", "Propón las líneas de proyecto concretas."),
-    ]) | llm_rapido(temperatura=0.4).with_structured_output(Ideacion)
-
-    inputs = {
-        "marco": marco_para("ideador"),
-        "aviso_solucion_primero": state.get("aviso_solucion_primero", ""),
-        "aviso_etico": state.get("aviso_etico", ""),
-        "tesis_similares": state.get("tesis_similares", ""),
-        "consulta": state.get("consulta", ""),
-        # A propósito SIN `contexto_libros`: la biblioteca son libros de METODOLOGÍA, y
-        # sus ejemplos (casi siempre de aula, docentes y rendimiento académico) no aportan
-        # nada a la ideación de tema; solo contaminan y el modelo acaba creyendo que el
-        # estudiante trabaja en educación.
-        # El prompt lo lee como «LO QUE YA SE SABE DE ÉL», así que la ficha va aquí: es
-        # justo lo que evita proponerle ideas de un dominio que no es el suyo.
-        "contexto_tesis": (
-            (state.get("ficha_txt", "") or "") + "\n\n" + (state.get("contexto_tesis", "") or "")
-        ).strip(),
-    }
-    try:
-        out = _invocar(chain, inputs)
-        contenido = _formatear_ideacion(out)
-    except Exception as exc:
-        logger.warning(f"[mini_grafo/ideador] Falló: {exc}")
-        contenido = ""
-    memoria = list(state.get("debate_memory") or [])
-    memoria.append({"agente": "ideador", "contenido": contenido})
-    return {"debate_memory": memoria, "texto_sintetizado": "", "recomendaciones": contenido}
-
-
-def _nodo_asesor(state: EstadoDebate) -> dict:
-    """Consulta conceptual: explica y aconseja, fundamentado en los libros."""
-    chain = ChatPromptTemplate.from_messages([
-        ("system", _PROMPT_ASESOR),
-        ("human", "Responde la consulta del estudiante."),
-    ]) | llm_rapido(temperatura=0.3)
-
-    inputs = {
-        "marco": marco_para("asesor"),
-        "enfoque": state.get("enfoque", "") or "(el estudiante aún no declaró tipo ni diseño de investigación)",
-        "aviso_no_aplica": state.get("aviso_no_aplica", ""),
-        "aviso_no_se": state.get("aviso_no_se", ""),
-        "aviso_etico": state.get("aviso_etico", ""),
-        "tesis_similares": state.get("tesis_similares", ""),
-        "consulta": state.get("consulta", ""),
-        "ficha_txt": state.get("ficha_txt", ""),
-        "contexto_tesis": state.get("contexto_tesis", ""),
-        "contexto_libros": state.get("contexto_libros", ""),
-        "criterios_rubrica": state.get("criterios_rubrica", ""),
-    }
-    try:
-        contenido = _invocar(chain, inputs)
-    except Exception as exc:
-        logger.warning(f"[mini_grafo/asesor] Falló: {exc}")
-        contenido = ""
-    memoria = list(state.get("debate_memory") or [])
-    memoria.append({"agente": "asesor", "contenido": contenido})
-    return {"debate_memory": memoria, "texto_sintetizado": "", "recomendaciones": contenido}
-
-
-def _nodo_redactor_metodologico(state: EstadoDebate) -> dict:
+def _nodo_rigor(state: EstadoDebate) -> dict:
     from backend.enfoque import especialista_metodologico
 
     doc = state.get("doc")
@@ -1259,6 +1044,7 @@ def _nodo_redactor_metodologico(state: EstadoDebate) -> dict:
         "ficha_txt": state.get("ficha_txt", ""),
         "contexto_tesis": state.get("contexto_tesis", ""),
         "criterios_rubrica": state.get("criterios_rubrica", ""),
+        "reglas_verificadas": state.get("reglas_verificadas", ""),
         "contexto_libros": state.get("contexto_libros", ""),
     }
     memoria = list(state.get("debate_memory") or [])
@@ -1289,6 +1075,7 @@ def _nodo_redactor_dominio(state: EstadoDebate) -> dict:
         "ficha_txt": state.get("ficha_txt", ""),
         "contexto_tesis": state.get("contexto_tesis", ""),
         "criterios_rubrica": state.get("criterios_rubrica", ""),
+        "reglas_verificadas": state.get("reglas_verificadas", ""),
         "contexto_libros": state.get("contexto_libros", ""),
         "historial_panel": _formatear_memoria(memoria),
     }
@@ -1317,6 +1104,7 @@ def _nodo_integrador(state: EstadoDebate) -> dict:
         "consulta": state.get("consulta", ""),
         "contexto_tesis": state.get("contexto_tesis", ""),
         "criterios_rubrica": state.get("criterios_rubrica", ""),
+        "reglas_verificadas": state.get("reglas_verificadas", ""),
         "historial_panel": _formatear_memoria(state.get("debate_memory") or []),
     }
     try:
@@ -1520,6 +1308,7 @@ def _nodo_estructurador(state: EstadoDebate) -> dict:
         texto_sintetizado=state.get("texto_sintetizado") or "(no se redactó texto de tesis en este turno)",
         recomendaciones=recomendaciones or "(sin recomendaciones)",
         criterios_rubrica=state.get("criterios_rubrica", ""),
+        reglas_verificadas=state.get("reglas_verificadas", ""),
         historial_panel=_formatear_memoria(state.get("debate_memory") or []),
         aviso_no_aplica=state.get("aviso_no_aplica", ""),
     )

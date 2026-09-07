@@ -138,14 +138,14 @@ export default function Sidebar({
                       onCerrar?.();
                     }}
                     className={cn(
-                      "w-full text-left rounded-xl px-3 py-2 text-[13px] flex items-center gap-2 transition-colors",
+                      "w-full text-left rounded-xl px-3 py-2 text-[13px] flex items-center gap-2 min-w-0 transition-colors",
                       c.id === conversacionActiva
                         ? "bg-accent text-accent-foreground font-medium"
                         : "hover:bg-muted text-foreground/80",
                     )}
                   >
                     <MessageSquare className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate pr-5">{c.titulo}</span>
+                    <span className="truncate flex-1 min-w-0 pr-5">{c.titulo}</span>
                   </button>
                   <button
                     onClick={() => onEliminar(c.id)}
@@ -163,7 +163,7 @@ export default function Sidebar({
             {recursosSlot}
 
             <div className="px-4 pb-3">
-              <div className="glass rounded-2xl p-3.5">
+              <div className="glass-scroll rounded-2xl p-3.5">
                 <div className="flex items-center gap-2 text-sm font-medium mb-2">
                   <BookOpen className="w-4 h-4 text-primary" />
                   Memoria de los agentes

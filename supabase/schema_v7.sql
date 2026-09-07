@@ -1,24 +1,26 @@
 -- ══════════════════════════════════════════════════════════════════════════
--- MentorIA — Esquema v7 (ficha del proyecto: memoria estructurada del chat)
+-- MentorIA — Esquema v7 (alcance de evaluación por chat)
 -- Ejecutar DESPUÉS de schema_v6.sql.  En: Supabase → SQL Editor → Run. Idempotente.
 --
--- Guarda los ~10 datos que gobiernan el proyecto (problema, cómo se mide hoy,
--- organización, artefacto, tipo, diseño, acceso a datos…) para que el panel deje
--- de preguntar lo que el estudiante YA respondió.
+-- Un proyecto de tesis se escribe por partes durante meses. Hasta ahora el
+-- sistema calificaba siempre los 33 ítems de la rúbrica, así que a quien solo
+-- tenía título e hipótesis le ponía 0 en metodología, presupuesto y referencias
+-- y le hundía una nota que no reflejaba su avance real.
 --
--- Vive en `conversaciones` y no en el documento a propósito: el caso que fallaba
--- era justamente el del estudiante que arranca de cero SIN PDF. Así también
--- sobrevive a los reinicios de Cloud Run, que vacían el registro en memoria.
+-- El estudiante declara ahora QUÉ PARTES quiere que se evalúen. Esa decisión es
+-- suya y debe sobrevivir al cierre del chat: sin persistirla, al reabrir la
+-- conversación el sistema volvía a proponer un alcance automático y podía
+-- calificar de más.
+--
+-- Forma del JSON:
+--   {"modo": "auto" | "declarado",
+--    "grupos": ["TÍTULO", "HIPÓTESIS Y VARIABLES"],
+--    "items":  [1, 2, 3, 18, 19, 20, 21]}
 -- ══════════════════════════════════════════════════════════════════════════
 
 alter table public.conversaciones
-  add column if not exists ficha jsonb not null default '{}'::jsonb;
+  add column if not exists doc_alcance jsonb not null default '{}'::jsonb;
 
-comment on column public.conversaciones.ficha is
-  'Ficha del proyecto: datos que el estudiante ya declaró en esta asesoría. '
-  'La escribe el backend con la service role key (api/ficha.py). '
-  'Semántica: el último valor gana; un campo vacío significa "aún no lo dijo".';
-
--- Las políticas RLS de `conversaciones` (schema.sql) ya cubren esta columna:
--- el usuario solo lee y actualiza sus propias filas. El backend escribe con la
--- service role key, que salta RLS, y filtra por id de conversación.
+comment on column public.conversaciones.doc_alcance is
+  'Alcance de evaluación declarado por el estudiante para el proyecto de este chat. '
+  'Los ítems fuera de este alcance no se califican y no restan.';

@@ -27,7 +27,13 @@ Arquitectura de 3 piezas separadas:
    Esto crea `conversaciones` y `mensajes` con Row Level Security (cada usuario solo ve lo suyo).
 2b. **Persistencia de sesión por chat**: ejecuta TAMBIÉN [`supabase/schema_v2.sql`](supabase/schema_v2.sql).
    Añade las columnas del documento a `conversaciones`, crea el bucket privado **`tesis`** (donde se
-   guarda el PDF de cada chat) y sus políticas RLS. Sin esto, el chat no recuerda el proyecto al reabrirlo.
+   guarda el documento de cada chat: PDF, Word o el texto pegado) y sus políticas RLS. Sin esto, el
+   chat no recuerda el proyecto al reabrirlo.
+2c. **Alcance de evaluación**: ejecuta TAMBIÉN [`supabase/schema_v7.sql`](supabase/schema_v7.sql).
+   Añade `conversaciones.doc_alcance`, donde se guarda qué partes del proyecto pidió evaluar el
+   estudiante. Sin esto, al reabrir un chat el sistema vuelve a su alcance automático y puede
+   calificar capítulos que el alumno había dejado fuera a propósito.
+
 3. **Copiar las 3 credenciales** (Dashboard → **Project Settings → API**):
    - `Project URL` → será `VITE_SUPABASE_URL` (frontend)
    - `anon public` key → será `VITE_SUPABASE_ANON_KEY` (frontend)
@@ -40,6 +46,16 @@ Arquitectura de 3 piezas separadas:
 ## Parte 2 — Backend en Cloud Run (`mentoria-api`)
 
 El `Dockerfile` de la raíz ya quedó configurado para FastAPI (`uvicorn api.main:app`).
+
+> **Antes de construir la imagen**, ten el corpus de títulos UPAO cosechado e indexado
+> en local: `data/titulos_upao.jsonl` y `chroma_db/titulos_upao/` viajan dentro de la
+> imagen (el `.gcloudignore` no los excluye a propósito), igual que `chroma_db/biblioteca/`.
+> Si faltan, el panel de título arranca igual pero sin la evidencia del repositorio.
+>
+> ```bash
+> python -m scripts.cosechar_titulos_upao   # ~6 min
+> python -m scripts.indexar_titulos         # ~5 min
+> ```
 
 ```bash
 # 1. Variables del proyecto

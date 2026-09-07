@@ -5,6 +5,7 @@ import { Award, ChartNoAxesColumn, GraduationCap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { AccionMensaje, AnalisisDetalle, Mensaje, RevisionCompleta } from "@/types";
+import AdjuntoChip from "./AdjuntoChip";
 import EstructuraCards from "./EstructuraCards";
 
 interface MessageBubbleProps {
@@ -17,7 +18,7 @@ interface MessageBubbleProps {
 export default function MessageBubble({ mensaje, onVerAnalisis, onVerRevision, onAccion }: MessageBubbleProps) {
   if (mensaje.tipo === "estructura" && mensaje.estructura) {
     return (
-      <div className="w-full">
+      <div className="w-full min-w-0">
         <EstructuraCards estructura={mensaje.estructura} />
       </div>
     );
@@ -28,11 +29,22 @@ export default function MessageBubble({ mensaje, onVerAnalisis, onVerRevision, o
       <motion.div
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        className="flex justify-end"
+        className="flex flex-col items-end gap-1.5 min-w-0 max-w-full"
       >
-        <div className="max-w-[78%] rounded-3xl rounded-br-lg bg-primary text-primary-foreground px-5 py-3 text-[15px] leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-          {mensaje.contenido}
-        </div>
+        {/* El texto largo pegado se muestra como adjunto, nunca volcado en la
+            burbuja: así la conversación sigue siendo legible. */}
+        {mensaje.adjuntos?.length ? (
+          <div className="flex flex-wrap justify-end gap-2 max-w-[78%]">
+            {mensaje.adjuntos.map((a) => (
+              <AdjuntoChip key={a.id} adjunto={a} compacto />
+            ))}
+          </div>
+        ) : null}
+        {mensaje.contenido && (
+          <div className="max-w-[78%] min-w-0 rounded-3xl rounded-br-lg bg-primary text-primary-foreground px-5 py-3 text-[15px] leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+            {mensaje.contenido}
+          </div>
+        )}
       </motion.div>
     );
   }
@@ -41,12 +53,12 @@ export default function MessageBubble({ mensaje, onVerAnalisis, onVerRevision, o
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      className="flex gap-3"
+      className="flex gap-3 min-w-0 max-w-full"
     >
       <div className="w-8 h-8 rounded-full bg-card shadow-sm border border-border grid place-items-center shrink-0">
         <GraduationCap className="w-5 h-5 text-primary" />
       </div>
-      <div className="max-w-[85%] glass rounded-3xl rounded-tl-lg px-5 py-4 text-[15px]">
+      <div className="max-w-[85%] min-w-0 glass-scroll rounded-3xl rounded-tl-lg px-5 py-4 text-[15px] break-words [overflow-wrap:anywhere]">
         <div className="prose-informe">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{mensaje.contenido}</ReactMarkdown>
         </div>

@@ -63,7 +63,7 @@ export default function RubricaTabla({
           )}
 
           {rubrica.grupos.map((g) => (
-            <section key={g.titulo} className="glass rounded-3xl p-2">
+            <section key={g.titulo} className="glass-scroll rounded-3xl p-2">
               <h2 className="px-3 pt-2 pb-1 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
                 {g.titulo}
               </h2>

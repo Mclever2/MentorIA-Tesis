@@ -62,16 +62,32 @@ export interface RubricaItemEval {
   // "na" (no exigible por tipo) ahora recibe el puntaje MÁXIMO; null solo en datos antiguos.
   puntaje: number | null;
   maximo: number;
-  estado: "ok" | "bajo" | "na" | "ausente";
+  // "fuera_alcance" = el estudiante no pidió evaluar esta parte: ni suma ni resta.
+  estado: "ok" | "bajo" | "na" | "ausente" | "fuera_alcance";
   razon?: string;
 }
 
 export interface RevisionCompleta {
-  calificacion: { puntaje: number; maximo: number; items: RubricaItemEval[] };
+  calificacion: {
+    puntaje: number;
+    maximo: number;
+    items: RubricaItemEval[];
+    items_evaluados?: number;
+    items_rubrica?: number;
+    items_fuera?: number;
+  };
   nota_vigesimal?: number | null;   // tabla oficial UPAO (0-99 → 0-20)
   fortalezas?: string[];
   debilidades?: string[];
   trazabilidad?: { coherente: boolean; observaciones: string };
+  // Alcance con el que se calificó: si `total` es false la nota es PARCIAL y se
+  // debe mostrar junto al avance sobre los 33 ítems de la rúbrica.
+  alcance?: {
+    total: boolean;
+    grupos: string[];
+    items_evaluados: number;
+    items_rubrica: number;
+  };
 }
 
 // Métrica complementaria: rúbrica del tipo evaluada por LLM-as-judge (escala /100).
@@ -79,6 +95,15 @@ export interface MetricaJuez {
   tipo: string;
   fuente?: string;
   calificacion: { puntaje: number; maximo: number; items: RubricaItemEval[] };
+}
+
+/** Texto largo pegado por el estudiante: viaja como adjunto, no como muro de texto. */
+export interface AdjuntoTexto {
+  id: string;
+  nombre: string;
+  texto: string;
+  lineas: number;
+  chars: number;
 }
 
 export interface Mensaje {
@@ -90,6 +115,8 @@ export interface Mensaje {
   detalles?: AnalisisDetalle[];
   revision?: RevisionCompleta;
   acciones?: AccionMensaje[];
+  // Adjuntos mostrados como chip (el contenido no se vuelca en la burbuja).
+  adjuntos?: AdjuntoTexto[];
 }
 
 export interface Conversacion {

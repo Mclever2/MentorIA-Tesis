@@ -7,7 +7,10 @@ import { cn } from "@/lib/utils";
  */
 export default function FondoLiquido({ intenso = false }: { intenso?: boolean }) {
   return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
+    <div
+      aria-hidden
+      className="pointer-events-none absolute inset-0 -z-10 overflow-hidden transform-gpu [will-change:transform]"
+    >
       <div
         className={cn(
           "absolute -top-32 left-[18%] h-96 w-96 rounded-full bg-primary/25 blur-[120px]",

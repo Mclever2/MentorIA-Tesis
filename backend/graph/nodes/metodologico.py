@@ -103,6 +103,9 @@ def make_nodo_metodologico(llm: ChatOpenAI):
             "contexto_biblioteca_disponible":    "",
             "contexto_secciones_relacionadas":   "",
             "enfoque":                           enfoque,
+            # Sin esto el metodólogo pedía «incluir un plan de muestreo» a un
+            # estudiante que había excluido el marco metodológico de la revisión.
+            "alcance_declarado":                 state.get("alcance_declarado") or "",
         }
 
         from backend.lora.lora_configs import get_loras_para_agente, TIPO_METODOLOGO
@@ -135,6 +138,7 @@ def make_nodo_metodologico(llm: ChatOpenAI):
                 ("system", system_prompt),
                 ("human", (
                     "{enfoque}\n\n"
+                    "{alcance_declarado}\n\n"
                     "Evalúa el rigor metodológico de la sección '{seccion}' "
                     "(iteración {numero_iteracion}). Verifica la TRAZABILIDAD: que el tipo y el "
                     "diseño declarados concuerden entre sí y con el contenido; señala incongruencias "

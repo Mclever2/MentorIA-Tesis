@@ -99,33 +99,73 @@ def biblioteca(_user: dict = Depends(usuario_actual)):
 
 @app.post("/api/documentos")
 async def subir_documento(
-    archivo: UploadFile = File(...),
+    archivo: UploadFile | None = File(default=None),
+    texto: str = Form(default=""),
+    enlace: str = Form(default=""),
+    nombre: str = Form(default=""),
     memoria: str = Form(default=""),
     user: dict = Depends(usuario_actual),
 ):
     """
-    Extrae texto del PDF (omitiendo el índice), vectoriza y devuelve la estructura.
+    Indexa el proyecto del estudiante venga como venga: archivo (PDF, Word,
+    texto), texto pegado en el chat o enlace de un Google Doc compartido.
+
+    El texto se extrae con la cascada de `backend.ingesta` y la estructura con
+    la de `backend.rag.estructura`, de modo que un avance sin índice —o un PDF
+    cuyas fuentes rompen a pdfplumber— ya no se queda sin secciones y, por
+    tanto, sin nada que evaluar.
 
     `memoria` (JSON opcional) llega en la rehidratación de un chat: reconstruye
     las secciones evaluadas y reaplica el texto corregido a la memoria RAG.
     La rúbrica y el reglamento NO viajan: son los oficiales UPAO, fijos en el
-    backend. El mapeo rúbrica→secciones se resuelve contra el TOC real del
-    proyecto en el momento de evaluar (determinístico, sin LLM).
+    backend. El mapeo rúbrica→secciones se resuelve contra la estructura real
+    del proyecto en el momento de evaluar (determinístico, sin LLM).
     """
     import json as _json
 
-    from backend.rag import (
-        construir_vector_store,
-        extraer_contenido_sin_indice,
-        obtener_stats_secciones,
+    from backend.ingesta import (
+        FormatoNoSoportado,
+        extraer_de_google_docs,
+        extraer_de_texto,
+        extraer_documento,
     )
+    from backend.alcance import alcance_sugerido
+    from backend.ingesta.gdocs import EnlaceInvalido
+    from backend.rag import construir_vector_store, obtener_stats_secciones
+    from backend.rag.estructura import resolver_estructura
     from backend.reglamento_upao import perfil_institucional_upao
     from .deps import get_embeddings
     from . import mejoras
 
-    contenido = await archivo.read()
-    pdf_hash = hashlib.md5(contenido).hexdigest()
     user_id = user.get("sub", "anon")
+
+    # ── 1. Qué nos mandaron ──────────────────────────────────────────────────
+    try:
+        if archivo is not None:
+            datos = await archivo.read()
+            extraido = extraer_documento(nombre or archivo.filename or "", datos)
+            huella = datos
+        elif (texto or "").strip():
+            extraido = extraer_de_texto(texto, nombre or "Texto pegado")
+            huella = texto.encode("utf-8", "ignore")
+        elif (enlace or "").strip():
+            extraido = extraer_de_google_docs(enlace)
+            huella = extraido.texto.encode("utf-8", "ignore")
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="No recibí ningún contenido: sube un archivo, pega el texto "
+                       "de tu proyecto o comparte el enlace de tu Google Doc.",
+            )
+    except (FormatoNoSoportado, EnlaceInvalido, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[documentos] Error extrayendo el contenido")
+        raise HTTPException(status_code=500, detail=f"Error leyendo el documento: {exc}")
+
+    contenido_hash = hashlib.md5(huella).hexdigest()
 
     memoria_dict = {}
     if memoria:
@@ -134,67 +174,182 @@ async def subir_documento(
         except Exception:
             logger.warning("[documentos] memoria malformada, se ignora")
 
-    existente = registry.buscar_documento_por_hash(user_id, pdf_hash)
+    existente = registry.buscar_documento_por_hash(user_id, contenido_hash)
     if existente:
-        # El vector store se reutiliza (mismo PDF ya indexado → no re-vectorizar),
-        # PERO el estado de evaluación es POR CHAT: se reemplaza con la memoria de
-        # ESTE chat (vacía si es nuevo) para no arrastrar lo evaluado en otra
-        # conversación con el mismo proyecto.
+        # El vector store se reutiliza (mismo contenido ya indexado → no
+        # re-vectorizar), PERO el estado de evaluación es POR CHAT: se reemplaza
+        # con la memoria de ESTE chat (vacía si es nuevo) para no arrastrar lo
+        # evaluado en otra conversación con el mismo proyecto.
         mejoras.reset_memoria(existente)
+        # El ALCANCE también es por chat: si el mismo proyecto se abrió en otra
+        # conversación con un alcance distinto, arrastrarlo aquí calificaría de
+        # más o de menos sin que el estudiante lo haya pedido en ESTE chat.
+        existente.alcance = alcance_sugerido(existente)
         if memoria_dict:
             mejoras.restaurar_memoria(existente, memoria_dict)
         return _documento_a_json(existente, ya_indexado=True)
 
+    # ── 2. Estructura + vectorización ────────────────────────────────────────
     try:
-        paginas, estructura_toc = extraer_contenido_sin_indice(contenido)
-        total_chars = sum(len(t) for _, t in paginas)
-        if total_chars < 100:
-            raise ValueError(
-                "El PDF parece vacío o es un escaneo sin texto seleccionable. "
-                "Asegúrate de que el PDF sea nativo (no solo imágenes)."
-            )
-
+        embeddings = get_embeddings()
+        estructura = resolver_estructura(extraido, embeddings=embeddings)
         vector_store = construir_vector_store(
-            paginas, estructura_toc, get_embeddings(),
-            collection_name=f"tesis_{pdf_hash[:8]}_{uuid.uuid4().hex[:6]}",
+            extraido.bloques, estructura.estructura, embeddings,
+            collection_name=f"tesis_{contenido_hash[:8]}_{uuid.uuid4().hex[:6]}",
+            grupos=estructura.grupos,
         )
         stats = obtener_stats_secciones(vector_store)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         logger.exception("[documentos] Error vectorizando")
-        raise HTTPException(status_code=500, detail=f"Error procesando el PDF: {exc}")
+        raise HTTPException(status_code=500, detail=f"Error procesando el documento: {exc}")
 
     doc = registry.registrar_documento(
         user_id=user_id,
-        nombre=archivo.filename or "tesis.pdf",
-        pdf_hash=pdf_hash,
+        nombre=extraido.nombre or "proyecto",
+        contenido_hash=contenido_hash,
         vector_store=vector_store,
-        estructura_toc=estructura_toc or {},
+        estructura_toc=estructura.estructura or {},
         stats=stats,
+        formato=extraido.formato,
+        origen_estructura=estructura.origen,
+        avisos=[*extraido.avisos, *estructura.avisos],
         # Perfil institucional FIJO: el reglamento UPAO modula la conducta de los
         # agentes en todos los proyectos (ya no hay reglamentos por usuario).
         universidad="UPAO",
         programa="ingeniería de sistemas",
         perfil_institucional=perfil_institucional_upao(),
     )
+    doc.alcance = alcance_sugerido(doc)
 
     if memoria_dict:
         mejoras.restaurar_memoria(doc, memoria_dict)
 
-    logger.info(f"[documentos] '{doc.nombre}' indexado — {len(stats)} secciones")
+    logger.info(
+        f"[documentos] '{doc.nombre}' ({doc.formato}) indexado — {len(stats)} secciones, "
+        f"estructura por {estructura.origen}"
+    )
     return _documento_a_json(doc)
 
 
 def _documento_a_json(doc, ya_indexado: bool = False) -> dict:
     return {
-        "doc_id":         doc.doc_id,
-        "nombre":         doc.nombre,
-        "hash":           doc.pdf_hash,
-        "ya_indexado":    ya_indexado,
-        "estructura_toc": doc.estructura_toc,
-        "stats":          doc.stats,
+        "doc_id":            doc.doc_id,
+        "nombre":            doc.nombre,
+        "hash":              doc.contenido_hash,
+        "ya_indexado":       ya_indexado,
+        "estructura_toc":    doc.estructura_toc,
+        "stats":             doc.stats,
+        "formato":           doc.formato,
+        "origen_estructura": doc.origen_estructura,
+        "avisos":            doc.avisos,
+        "alcance":           doc.alcance,
     }
+
+
+class FragmentoRequest(BaseModel):
+    doc_id: str
+    texto: str
+    nombre: str = "Texto pegado"
+
+
+@app.post("/api/fragmento")
+def agregar_fragmento(req: FragmentoRequest, user: dict = Depends(usuario_actual)):
+    """Texto pegado por el estudiante CUANDO ya tiene un proyecto indexado.
+
+    No se toca el proyecto: se detecta a qué sección corresponde y se guarda
+    como versión de trabajo pendiente, que es el mismo mecanismo que usan las
+    mejoras del chat. Así, al evaluar, el sistema le pregunta si quiere usar
+    ESTA versión en lugar de la de su documento, en vez de pisarla sin avisar.
+    """
+    from backend.rag import resolver_seccion_semantica
+    from backend.rag.estructura import _pista_lexica
+    from . import mejoras
+
+    doc = _obtener_doc_o_404(req.doc_id, user)
+    texto = (req.texto or "").strip()
+    if len(texto) < 40:
+        raise HTTPException(status_code=422, detail="El texto pegado es demasiado corto.")
+
+    toc = list(doc.estructura_toc or {})
+    seccion = None
+
+    # Primero los marcadores inequívocos («objetivo general», «hipótesis»…), que
+    # son mucho más precisos que la similitud pura; después el RAG del proyecto.
+    pista = _pista_lexica(texto)
+    if pista:
+        seccion = pista if pista in toc else resolver_seccion_semantica(doc.vector_store, pista, toc)
+    if not seccion and toc:
+        seccion = resolver_seccion_semantica(doc.vector_store, texto[:600], toc)
+
+    if not seccion:
+        return {
+            "seccion": None,
+            "mensaje": (
+                "Guardé tu texto, pero no logré ubicarlo en una sección concreta de tu "
+                "proyecto. Dime a qué parte corresponde (por ejemplo «son mis objetivos») "
+                "y lo asocio."
+            ),
+        }
+
+    mejoras.registrar_mejora_chat(doc, seccion, texto)
+    logger.info(f"[fragmento] Texto pegado asociado a «{seccion}» ({len(texto)} chars)")
+    return {
+        "seccion": seccion,
+        "mensaje": (
+            f"Indexé tu texto como versión de trabajo de **{seccion}**. Tu documento "
+            f"original no se modificó: cuando pidas «evalúa mi {seccion}» te preguntaré "
+            "si quieres que evalúe esta versión o la de tu archivo."
+        ),
+    }
+
+
+class AlcanceRequest(BaseModel):
+    doc_id: str
+    grupos: list[str] | None = None
+    todo: bool = False
+
+
+@app.get("/api/alcance")
+def catalogo_alcance(doc_id: str = "", user: dict = Depends(usuario_actual)):
+    """Grupos evaluables y alcance actual del proyecto.
+
+    El frontend lo usa para pintar el selector «¿qué quieres que evalúe?» con
+    los grupos que el estudiante ya tiene escritos premarcados.
+    """
+    from backend.alcance import grupos_disponibles
+
+    doc = registry.obtener_documento(doc_id) if doc_id else None
+    if doc is not None and doc.user_id != user.get("sub", "anon"):
+        doc = None
+
+    cubiertos: dict[str, int] = {}
+    if doc is not None:
+        from backend.config import _buscar_items_seccion
+        for stat in (doc.stats or []):
+            for num in _buscar_items_seccion(stat.get("seccion", "")):
+                cubiertos[str(num)] = max(cubiertos.get(str(num), 0), stat.get("chars", 0))
+
+    return {
+        "grupos":            grupos_disponibles(),
+        "alcance":           (doc.alcance if doc else {}),
+        "chars_por_item":    cubiertos,
+    }
+
+
+@app.post("/api/alcance")
+def fijar_alcance(req: AlcanceRequest, user: dict = Depends(usuario_actual)):
+    """El estudiante declara qué partes de su proyecto quiere que se evalúen."""
+    from backend import alcance as alcance_mod
+
+    doc = _obtener_doc_o_404(req.doc_id, user)
+    doc.alcance = alcance_mod.completo() if req.todo else alcance_mod.normalizar(req.grupos, doc)
+    logger.info(
+        f"[alcance] '{doc.nombre}' → {', '.join(doc.alcance['grupos'])} "
+        f"({len(doc.alcance['items'])} ítems)"
+    )
+    return {"alcance": doc.alcance}
 
 
 def _es_encabezado_capitulo(nombre: str) -> bool:
@@ -383,6 +538,104 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
                 "tiene_documento": doc is not None,
                 "campos_ficha": len(ficha_mod.completos(ficha_actual)),
             },
+        )
+        return {"tipo": "conversacion", "respuesta": respuesta}
+
+    if intencion["modo"] == "ideacion":
+        # El estudiante aún no tiene tema. Es el único modo que funciona SIN
+        # proyecto indexado, y el que más aprovecha el corpus del repositorio.
+        from .ideacion import responder_ideacion
+        from .deps import get_biblioteca
+
+        res = responder_ideacion(
+            mensaje=req.mensaje,
+            historial=historial,
+            doc=doc,
+            biblioteca=get_biblioteca(),
+        )
+        analytics.registrar_evento(
+            user_id, analytics.MEJORA_RAPIDA,
+            conversacion_id=req.conversacion_id,
+            payload={"panel": "ideacion", "propuso_titulo": bool(res.get("titulo"))},
+        )
+        return {"tipo": "conversacion", "respuesta": res["respuesta"]}
+
+    if intencion["modo"] == "metodologia":
+        # Operacionalización, matriz de consistencia y marco metodológico.
+        from .metodologia import responder_metodologia
+        from .deps import get_biblioteca
+
+        res = responder_metodologia(
+            mensaje=req.mensaje, historial=historial, doc=doc,
+            biblioteca=get_biblioteca(),
+        )
+        analytics.registrar_evento(
+            user_id, analytics.MEJORA_RAPIDA,
+            conversacion_id=req.conversacion_id,
+            payload={"panel": "metodologia"},
+        )
+        return {"tipo": "conversacion", "respuesta": res["respuesta"]}
+
+    if intencion["modo"] == "antecedentes":
+        # Antecedentes y marco teórico: estrategia de búsqueda y estructura, nunca
+        # el contenido — las citas las verifica y escribe el estudiante.
+        from .antecedentes import responder_antecedentes
+        from .deps import get_biblioteca
+
+        res = responder_antecedentes(
+            mensaje=req.mensaje, historial=historial, doc=doc,
+            biblioteca=get_biblioteca(),
+        )
+        analytics.registrar_evento(
+            user_id, analytics.MEJORA_RAPIDA,
+            conversacion_id=req.conversacion_id,
+            payload={"panel": "antecedentes"},
+        )
+        return {"tipo": "conversacion", "respuesta": res["respuesta"]}
+
+    if intencion["modo"] == "planteamiento":
+        # Cadena problema → preguntas específicas (Bloom) → objetivos, con enfoque
+        # por objetivo y reparto realista entre Tesis 1 y Tesis 2.
+        from .planteamiento import responder_planteamiento
+        from .deps import get_biblioteca
+
+        res = responder_planteamiento(
+            mensaje=req.mensaje, historial=historial, doc=doc,
+            biblioteca=get_biblioteca(),
+        )
+        analytics.registrar_evento(
+            user_id, analytics.MEJORA_RAPIDA,
+            conversacion_id=req.conversacion_id,
+            payload={"panel": "planteamiento"},
+        )
+        return {"tipo": "conversacion", "respuesta": res["respuesta"]}
+
+    if intencion["modo"] == "titulo":
+        # Panel de título: proponente → verificador de anclaje → auditor.
+        from .titulo_panel import responder_titulo
+        from .deps import get_biblioteca
+
+        res = responder_titulo(
+            mensaje=req.mensaje,
+            historial=historial,
+            doc=doc,
+            biblioteca=get_biblioteca(),
+        )
+        respuesta = res["respuesta"]
+        titulo = (res.get("titulo") or "").strip()
+        # El título es corto, así que no pasa el umbral de 200 chars del debate rápido;
+        # se guarda igual para que «evalúa mi título» pueda calificar ESTA versión.
+        if doc is not None and titulo and res.get("seccion"):
+            mejoras.registrar_mejora_chat(doc, res["seccion"], titulo)
+            respuesta += (
+                f"\n\n---\n💡 Guardé este título como tu versión de trabajo. Si quieres la "
+                "calificación formal, dime «evalúa mi título»."
+            )
+        analytics.registrar_evento(
+            user_id, analytics.MEJORA_RAPIDA,
+            conversacion_id=req.conversacion_id,
+            secciones=[res.get("seccion")] if res.get("seccion") else None,
+            payload={"panel": "titulo", "propuso_titulo": bool(titulo)},
         )
         return {"tipo": "conversacion", "respuesta": respuesta}
 

@@ -20,7 +20,12 @@ steps:
 images:
   - gcr.io/$PROJECT_ID/mentoria
 substitutions:
-  #    Copia la URL que devuelve `gcloud run deploy mentoria-back` y pégala aquí.
+  # OJO: esta URL queda EMBEBIDA en el bundle. Si no coincide con el backend real,
+  # el navegador reporta un error de CORS que en realidad es un 404: el host no
+  # existe, y un host inexistente no devuelve cabeceras Access-Control-*.
+  # Debe ser exactamente la URL que imprime `gcloud run deploy mentoria-back`, y la
+  # misma que el backend tiene en ALLOWED_ORIGINS del lado del frontend.
+  #   gcloud run services describe mentoria-back --region us-central1 --format='value(status.url)'
   _VITE_API_URL: 'https://mentoria-back-992830166095.us-central1.run.app'
   _VITE_SUPABASE_URL: 'https://jyhqwjxqwypxqlgvhdxr.supabase.co'
   _VITE_SUPABASE_ANON_KEY: 'sb_publishable_oOBKJU-HamAT2SMxXijdXg_r82t9pMc'

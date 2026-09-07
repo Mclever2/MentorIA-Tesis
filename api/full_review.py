@@ -46,13 +46,21 @@ from .grafo import ejecutar_seccion
 logger = logging.getLogger(__name__)
 
 _MAX_CHARS_VENTANA       = 7000   # presupuesto por llamada de diagnóstico
-_MIN_CHARS_UNIDAD        = 120    # por debajo: prácticamente solo título → no se diagnostica
+# Por debajo de esto la unidad es prácticamente solo su encabezado y no se
+# diagnostica. Ojo con subirlo: la unidad «Título del proyecto» son literalmente
+# una línea (medido: 119 caracteres en un proyecto real), así que con el umbral
+# en 120 el título se saltaba por UN carácter y sus ítems 1-3 salían «ausente»
+# con 0 puntos — el mismo perjuicio que el alcance declarado viene a evitar.
+# Las secciones que son solo encabezado ya se descartan al indexar (<45 chars).
+_MIN_CHARS_UNIDAD        = 60
 
 _PROMPT_BARRIDO = """Eres un auditor académico experto en proyectos de tesis.
 Califica el texto de UNA sección contra los ÍTEMS de rúbrica dados. Sé crítico, realista y concreto.
 Escala POR ÍTEM: 0 a {escala} (0 = no cumple/ausente; {escala} = excelente; usa valores intermedios).
 
 {enfoque}
+
+{alcance}
 
 REGLA DE TIPO: si un ítem exige algo que el ENFOQUE NO requiere (p. ej. hipótesis en estudio
 cualitativo, 2.ª variable cuando el tipo usa una sola, operacionalización donde no corresponde),
@@ -85,6 +93,9 @@ Máximo 3 fortalezas y 3 debilidades.
 CONTEXTO DE COHERENCIA (otras secciones del proyecto — úsalo SOLO para verificar ítems relacionales):
 {coherencia}
 
+MEDICIONES VERIFICADAS FUERA DEL MODELO (dalas por ciertas; no las recalcules ni las contradigas):
+{mediciones}
+
 ÍTEMS DE LA RÚBRICA APLICABLES A ESTA SECCIÓN:
 {criterios}
 
@@ -97,7 +108,15 @@ de un proyecto de tesis, redacta un informe ejecutivo BREVE en markdown y españ
 1. "## Diagnóstico general" — 3-4 frases sobre el estado global del proyecto.
 2. "## Plan de acción recomendado" — 4-6 pasos concretos y priorizados.
 NO reescribas la tesis. NO inventes contenido que no esté en los diagnósticos.
-Máximo ~300 palabras (la calificación por ítem se muestra aparte en una tabla)."""
+Máximo ~300 palabras (la calificación por ítem se muestra aparte en una tabla).
+
+{alcance}
+LÍMITE DEL ALCANCE (obligatorio): el estudiante eligió qué partes quería que se revisaran, y solo
+recibes los diagnósticos de esas. NO diagnostiques ni recomiendes nada sobre las partes que no
+están aquí —metodología, población, cronograma, presupuesto, referencias si no aparecen—: no es
+que estén mal, es que no tocaba revisarlas, y decirle que «faltan» o que «limitan el avance» es
+falso y lo desmotiva. Si crees que una parte ausente condiciona lo revisado, dilo en UNA frase
+como nota de secuencia, no como deficiencia."""
 
 _PROMPT_TRAZABILIDAD = """Eres un metodólogo. Verifica la TRAZABILIDAD del proyecto: que el tipo y
 diseño declarados concuerden entre sí y con el problema, objetivos, hipótesis y variables.
@@ -266,125 +285,130 @@ def _digest_coherencia(unidades: list[dict], max_por_sec: int = 450, tope: int =
     """Resumen compacto del ESQUELETO (título · problema/pregunta · objetivos · hipótesis ·
     variables · tipo/diseño · población) para que el barrido pueda juzgar ítems RELACIONALES
     (p. ej. 'el objetivo guarda relación con el problema') que viven en otra sección."""
+    from backend.config import PORTADA_UPAO
+
     partes = []
     for u in unidades:
-        if _es_nucleo(u["unidad"]):
+        # La portada entra aunque no tenga ítems propios: ahí está lo DECLARADO
+        # (línea de investigación, tipo/finalidad, institución), que es contra lo
+        # que se contrasta si el proyecto va alineado con lo que dice ser.
+        if _es_nucleo(u["unidad"]) or u["unidad"] == PORTADA_UPAO:
             txt = " ".join(u["chunks"]).strip()[:max_por_sec]
             if txt:
                 partes.append(f"[{u['unidad']}] {txt}")
     return "\n".join(partes)[:tope] or "(sin contexto disponible)"
 
 
-# ── Cotejo determinístico de citas (anti-complacencia, sin LLM) ────────────────
-# Citas parentéticas «(Apellido et al., 2023)» y narrativas «Apellido (2023)».
-_RE_CITA_PAREN = re.compile(
-    r"\(\s*([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\-]+)[^()]{0,80}?,\s*((?:19|20)\d{2})[a-z]?\s*\)"
-)
-_RE_CITA_NARRativa = re.compile(
-    r"\b([A-ZÁÉÍÓÚÑ][a-záéíóúüñ\-]{3,})(?:\s+et\s+al\.?|\s+y\s+[A-ZÁÉÍÓÚÑ][a-záéíóúüñ\-]+)?\s*"
-    r"\(\s*((?:19|20)\d{2})[a-z]?\s*\)"
-)
+def _recalificar_contradicciones(llm, u: dict, items: list[dict], eval_items: dict,
+                                 contenido: str, escala: int, enfoque: str,
+                                 alcance: str, coherencia: str, mediciones: str) -> None:
+    """Vuelve a puntuar los ítems cuya justificación niega un hecho ya medido.
 
+    Se detectó al evaluador restar por «no delimita el contexto geográfico ni
+    temporal» sobre un título que dice «…de empresas Trujillo 2026», teniendo la
+    medición delante. Bajarle la nota a un alumno por algo que su texto SÍ tiene es
+    el peor error que puede cometer el sistema, y decirle al modelo que no
+    contradiga la medición no lo evita.
 
-def _norm_txt(t: str) -> str:
-    return unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode("ascii").lower()
-
-
-def _cotejo_citas(unidades: list[dict]) -> dict | None:
-    """Coteja las citas en el TEXTO contra la lista de REFERENCIAS (determinístico).
-
-    Devuelve {"citas": n, "faltantes": ["Apellido (año)", …]} o None si el proyecto
-    no tiene sección de referencias detectable (no se puede cotejar → no se opina).
+    No se le corrige el puntaje por nuestra cuenta —eso sería inventar una nota—:
+    se le devuelve la contradicción y se le pide que puntúe otra vez SIN ese motivo.
+    El ítem puede seguir sin llegar al máximo por otras razones, y está bien.
     """
-    refs_chunks, cuerpo_chunks = [], []
-    for u in unidades:
-        destino = refs_chunks if _RE_SEC_REF_UNIDAD.search(u["unidad"]) else cuerpo_chunks
-        destino.extend(u["chunks"])
-    refs_texto = _norm_txt("\n".join(refs_chunks))
-    if len(refs_texto) < 200:
-        return None
+    from backend.verificaciones import contradicciones_titulo, es_seccion_titulo
 
-    cuerpo = "\n".join(cuerpo_chunks)
-    citas: set[tuple[str, str]] = set()
-    for rx in (_RE_CITA_PAREN, _RE_CITA_NARRativa):
-        for m in rx.finditer(cuerpo):
-            apellido = m.group(1).strip()
-            if len(apellido) > 3 and _norm_txt(apellido) not in ("segun", "figura", "tabla"):
-                citas.add((apellido, m.group(2)))
-
-    faltantes = sorted(
-        f"{ap} ({anio})" for ap, anio in citas if _norm_txt(ap) not in refs_texto
-    )
-    return {"citas": len(citas), "faltantes": faltantes}
-
-
-_RE_SEC_REF_UNIDAD = re.compile(r"referencia", re.IGNORECASE)
-_ITEMS_VERIFICACION_CITAS = {15, 17, 32, 33}
-
-
-def _aplicar_cotejo_a_calificacion(calificacion: dict, cotejo: dict | None, escala: int) -> None:
-    """Tope determinístico anti-complacencia: con citas sin referencia detectadas,
-    los ítems de correspondencia texto↔referencias (15 y 32) no pueden quedar en el
-    máximo aunque el LLM lo haya dado (evita el caso real: ítem 15 en 3/3 con una
-    cita no referenciada, contradiciendo al ítem 32). Recalcula el total."""
-    if not cotejo or not cotejo.get("faltantes"):
+    if not es_seccion_titulo(u["unidad"]):
         return
-    detalle = ", ".join(cotejo["faltantes"][:5])
-    umbral_ok = round(escala * 2 / 3)
-    ajustado = False
-    for it in calificacion.get("items") or []:
-        if it["numero"] not in (15, 32) or it["estado"] in ("na", "ausente"):
-            continue
-        if (it["puntaje"] or 0) >= escala:
-            it["puntaje"] = escala - 1
-            it["estado"] = "ok" if it["puntaje"] >= umbral_ok else "bajo"
-            it["razon"] = (
-                f"Cotejo automático texto↔referencias: hay citas SIN referencia "
-                f"({detalle}), por lo que este criterio no puede estar en el máximo. "
-                + (it.get("razon") or "")
-            )[:400]
-            ajustado = True
-    if ajustado:
-        calificacion["puntaje"] = sum(it["puntaje"] or 0 for it in calificacion["items"])
-        logger.info(f"[revision_completa] Cotejo aplicó tope a ítems 15/32 ({detalle}).")
 
+    conflictivos = {
+        num: avisos
+        for num, ev in eval_items.items()
+        if ev.get("puntaje", 0) < escala
+        and (avisos := contradicciones_titulo(ev.get("razon", ""), contenido))
+    }
+    if not conflictivos:
+        return
 
-def _bloque_cotejo(cotejo: dict | None) -> str:
-    if not cotejo:
-        return ""
-    if cotejo["faltantes"]:
-        detalle = ", ".join(cotejo["faltantes"][:8])
-        extra = f" (y {len(cotejo['faltantes']) - 8} más)" if len(cotejo["faltantes"]) > 8 else ""
-        estado = (f"Se detectaron {len(cotejo['faltantes'])} citas SIN referencia "
-                  f"correspondiente: {detalle}{extra}.")
-    else:
-        estado = "Todas las citas del texto tienen una referencia con el mismo apellido."
-    return (
-        f"\n\n## COTEJO DE CITAS (verificación automática texto↔referencias — "
-        f"{cotejo['citas']} citas únicas detectadas)\n{estado}\n"
-        "Usa este cotejo como evidencia para los ítems de citas/referencias; no lo contradigas sin motivo."
+    desc = {it["numero"]: it.get("descripcion", "") for it in items}
+    criterios = "\n".join(f"{n:02d}. {desc.get(n, '')}" for n in sorted(conflictivos))
+    correccion = "\n".join(
+        f"Ítem {n}: " + " ".join(avisos) for n, avisos in sorted(conflictivos.items())
     )
+    logger.info(f"[revision_completa] Recalificando {sorted(conflictivos)} — "
+                f"la justificación contradecía la medición del título")
+    try:
+        resp = llm.invoke([
+            SystemMessage(content=_PROMPT_BARRIDO.format(
+                escala=escala, enfoque=enfoque, criterios=criterios,
+                seccion=u["unidad"], nota_ventana="", alcance=alcance,
+                coherencia=coherencia or "(sin contexto disponible)",
+                mediciones=mediciones,
+            )),
+            HumanMessage(content=(
+                f"{contenido}\n\n---\nCORRECCIÓN OBLIGATORIA de tu propia calificación:\n"
+                f"{correccion}\n\nVuelve a puntuar SOLO esos ítems. Si aún no llegan al máximo, "
+                "el motivo debe ser otro y debes decir cuál."
+            )),
+        ])
+        data = extraer_json(resp.content) or {}
+    except Exception as exc:
+        logger.warning(f"[revision_completa] Recalificación por contradicción falló: {exc}")
+        return
+
+    for r in (data.get("items") or []):
+        try:
+            num = int(r.get("numero"))
+            p = max(0, min(int(escala), int(round(float(r.get("puntaje", 0))))))
+        except (TypeError, ValueError):
+            continue
+        if num not in conflictivos:
+            continue
+        # Solo se acepta si deja de contradecir la medición; si insiste, se queda
+        # la nota original antes que premiar una segunda respuesta igual de falsa.
+        razon = (r.get("razon") or "")[:300]
+        if contradicciones_titulo(razon, contenido):
+            continue
+        eval_items[num] = {"puntaje": p, "aplica": bool(r.get("aplica", True)), "razon": razon}
+
+
+def _items_calificables(u: dict, rubrica: dict | None, anclas: dict[int, list[str]] | None,
+                        items_alcance: set[int] | None) -> list[dict]:
+    """Ítems de rúbrica que esta unidad va a recibir, ya recortados al alcance.
+
+    Fuera del alcance declarado no se califica: ni se gastan tokens ni se emite
+    una nota que el estudiante no pidió y que le restaría.
+    """
+    items = _items_de_unidad(u["unidad"], u["secciones_raw"], rubrica, anclas)
+    if items_alcance is not None:
+        items = [it for it in items if it["numero"] in items_alcance]
+    return items
 
 
 def _diagnosticar_unidad(llm, u: dict, rubrica: dict | None, enfoque: str, escala: int,
                          anclas: dict[int, list[str]] | None = None,
-                         coherencia: str = "", cotejo: dict | None = None) -> dict | None:
-    """Califica los ÍTEMS de rúbrica mapeados a la unidad (1 llamada). None si no tiene ítems."""
-    items = _items_de_unidad(u["unidad"], u["secciones_raw"], rubrica, anclas)
+                         coherencia: str = "", tipo: str | None = None,
+                         diseno: str | None = None, alcance: str = "",
+                         items_alcance: set[int] | None = None,
+                         items: list[dict] | None = None) -> dict | None:
+    """Califica los ÍTEMS de rúbrica mapeados a la unidad (1 llamada). None si no tiene ítems.
+
+    `items`: ítems ya resueltos por el llamador (que necesita saber de antemano si
+    la unidad tiene algo que calificar para no anunciarla en vano).
+    """
+    if items is None:
+        items = _items_calificables(u, rubrica, anclas, items_alcance)
     if not items:
         return None
 
     criterios = "\n".join(f"{it['numero']:02d}. {it.get('descripcion', '')}" for it in items)
     contenido = "\n\n".join(u["chunks"])[: _MAX_CHARS_VENTANA * 2]
-    # Ítems de verificación de citas → adjuntar el cotejo automático como evidencia.
-    if cotejo and any(it["numero"] in _ITEMS_VERIFICACION_CITAS for it in items):
-        contenido += _bloque_cotejo(cotejo)
+    mediciones = _mediciones(u["unidad"], contenido, tipo, diseno, coherencia)
     try:
         resp = llm.invoke([
             SystemMessage(content=_PROMPT_BARRIDO.format(
                 escala=escala, enfoque=enfoque, criterios=criterios,
-                seccion=u["unidad"], nota_ventana="",
+                seccion=u["unidad"], nota_ventana="", alcance=alcance,
                 coherencia=coherencia or "(sin contexto disponible)",
+                mediciones=mediciones,
             )),
             HumanMessage(content=contenido),
         ])
@@ -414,6 +438,9 @@ def _diagnosticar_unidad(llm, u: dict, rubrica: dict | None, enfoque: str, escal
     # Ítems mapeados que el LLM no devolvió → 0 (presentes pero no calificados).
     for it in items:
         eval_items.setdefault(it["numero"], {"puntaje": 0, "aplica": True, "razon": ""})
+
+    _recalificar_contradicciones(llm, u, items, eval_items, contenido, escala,
+                                 enfoque, alcance, coherencia, mediciones)
 
     return {
         "unidad":        u["unidad"],
@@ -543,13 +570,36 @@ Responde SOLO con JSON válido:
 CONTEXTO DE COHERENCIA (otras secciones del proyecto — solo para ítems relacionales):
 {coherencia}
 
+MEDICIONES VERIFICADAS FUERA DEL MODELO (dalas por ciertas; no las recalcules ni las contradigas):
+{mediciones}
+
 ÍTEMS A CALIFICAR:
 {criterios}
 """
 
 
+def _mediciones(seccion: str, texto: str, tipo: str | None, diseno: str | None,
+                contexto: str = "") -> str:
+    """Hechos medidos (extensión y delimitación del título, vigencia de las citas).
+
+    Se los damos resueltos al juez: contar palabras y años, y decidir qué
+    delimitación exige este tipo de estudio, son justo las dos cosas que un LLM
+    resuelve mal y que hacían que el título pasara sin delimitar."""
+    from backend.verificaciones import mediciones_de_seccion
+
+    try:
+        return mediciones_de_seccion(
+            seccion=seccion, texto=texto, tipo_investigacion=tipo,
+            diseno=diseno, contexto_proyecto=contexto,
+        )
+    except Exception as exc:                              # noqa: BLE001
+        logger.warning(f"[revision_completa] Mediciones fallaron en '{seccion}': {exc}")
+        return "(no disponible)"
+
+
 def _recalificar(llm, items: list[dict], texto: str, enfoque: str, escala: int,
-                 coherencia: str = "") -> dict:
+                 coherencia: str = "", seccion: str = "", tipo: str | None = None,
+                 diseno: str | None = None) -> dict:
     """Re-puntúa una lista de ítems (con número int) contra un TEXTO (1 llamada).
 
     Se usa para re-calificar el núcleo contra el texto MEJORADO, de modo que la nota
@@ -563,6 +613,7 @@ def _recalificar(llm, items: list[dict], texto: str, enfoque: str, escala: int,
             SystemMessage(content=_PROMPT_REGRADE.format(
                 escala=escala, enfoque=enfoque, criterios=criterios,
                 coherencia=coherencia or "(sin contexto)",
+                mediciones=_mediciones(seccion, texto, tipo, diseno, coherencia),
             )),
             HumanMessage(content=texto[: _MAX_CHARS_VENTANA * 2]),
         ])
@@ -591,8 +642,13 @@ def _recalificar(llm, items: list[dict], texto: str, enfoque: str, escala: int,
 
 def _consolidar_calificacion(diagnosticos: list[dict], items_all: list[dict],
                              ausentes: list[dict], escala: int,
-                             tipo_etiqueta: str = "") -> dict:
-    """Une las evaluaciones por unidad en una calificación por ítem (todos los ítems)."""
+                             items_alcance: set[int] | None = None) -> dict:
+    """Une las evaluaciones por unidad en una calificación por ítem (todos los ítems).
+
+    Los ítems FUERA del alcance declarado se listan como «no evaluados» y no
+    entran ni en el puntaje ni en el máximo: el estudiante no puede salir
+    perjudicado por una parte del proyecto que todavía no ha escrito.
+    """
     por_item: dict[int, list[dict]] = {}
     secs_item: dict[int, list[str]] = {}
     for d in diagnosticos:
@@ -609,6 +665,14 @@ def _consolidar_calificacion(diagnosticos: list[dict], items_all: list[dict],
     umbral_ok = round(escala * 2 / 3)
     for it in items_all:
         num = it["numero"]
+        if items_alcance is not None and num not in items_alcance:
+            items_out.append({
+                "numero": num, "descripcion": desc.get(num, ""), "secciones": [],
+                "puntaje": None, "maximo": escala, "estado": "fuera_alcance",
+                "razon": "No evaluado: está fuera del alcance que elegiste para esta "
+                         "revisión. No afecta tu puntaje.",
+            })
+            continue
         evs = por_item.get(num)
         if not evs:
             items_out.append({"numero": num, "descripcion": desc.get(num, ""), "secciones": [],
@@ -664,8 +728,18 @@ def _consolidar_calificacion(diagnosticos: list[dict], items_all: list[dict],
         total += p
         maximo += escala
     _ = ausente_nums  # (los ausentes ya caen en la rama "sin evs")
-    return {"puntaje": total, "maximo": maximo,
-            "items": sorted(items_out, key=lambda x: x["numero"])}
+    calificados = [i for i in items_out if i["estado"] in ("ok", "bajo", "ausente")]
+    return {
+        "puntaje": total,
+        "maximo": maximo,
+        "items": sorted(items_out, key=lambda x: x["numero"]),
+        # Avance sobre la rúbrica COMPLETA: cuántos de los 33 ítems ya se han
+        # podido calificar. Acompaña a la nota del alcance para que el alumno
+        # no confunda «16 sobre lo que entregué» con «16 en la sustentación».
+        "items_evaluados":  len(calificados),
+        "items_rubrica":    len(items_all),
+        "items_fuera":      sum(1 for i in items_out if i["estado"] == "fuera_alcance"),
+    }
 
 
 def _evaluar_trazabilidad(llm, unidades: list[dict], enfoque: str) -> dict:
@@ -879,8 +953,45 @@ def _es_encabezado_capitulo(nombre: str) -> bool:
     return bool(pref) and "." not in pref
 
 
+def _tiene_hijos(nombre: str, toc_nombres: list[str]) -> bool:
+    """¿Cuelgan secciones de esta, mirando el índice en orden de lectura?
+
+    Se compara por POSICIÓN y no solo por prefijo porque un proyecto numera desde
+    1 en cada parte: «1 Título» vive en las generalidades y «1 Planteamiento» en el
+    plan de investigación, así que «1.1 Descripción» empieza por «1.» sin ser hija
+    del título. Los hijos de una sección son los que vienen justo detrás, hasta el
+    primer encabezado del mismo nivel o más alto.
+    """
+    pref = _prefijo_num(nombre)
+    if not pref:
+        return False
+    nivel = pref.count(".")
+    try:
+        inicio = toc_nombres.index(nombre) + 1
+    except ValueError:
+        return False
+    for otro in toc_nombres[inicio:]:
+        p = _prefijo_num(otro)
+        if not p:
+            continue
+        if p.count(".") <= nivel:
+            return False                      # empezó la sección hermana
+        if p.startswith(pref + "."):
+            return True
+    return False
+
+
 def _secciones_nucleo(toc_nombres: list[str]) -> list[str]:
-    return [n for n in toc_nombres if _es_nucleo(n) and not _es_encabezado_capitulo(n)]
+    """Subpuntos del núcleo presentes en el índice.
+
+    Un encabezado de un solo nivel se descarta SOLO si de verdad es un contenedor,
+    es decir, si el índice trae secciones colgando de él. «1 Título» no tiene
+    hijos: es la sección del título, y descartarlo por su forma dejaba fuera del
+    núcleo justo el subpunto que peor puntúa —el redactor nunca lo reescribía—.
+    """
+    return [n for n in toc_nombres
+            if _es_nucleo(n)
+            and not (_es_encabezado_capitulo(n) and _tiene_hijos(n, toc_nombres))]
 
 
 def _plan_nucleo(nucleo: list[str], diagnosticos: list[dict], escala: int, tope: int = 8) -> dict:
@@ -944,6 +1055,30 @@ def _plan_nucleo(nucleo: list[str], diagnosticos: list[dict], escala: int, tope:
             "razones_reescribir": razones_reescribir}
 
 
+def _items_sin_omitidos(items_rg: list[dict], plan: dict, texto_mejorado: str,
+                        diagnosticos: list[dict]) -> list[dict]:
+    """Quita de la recalificación los ítems de los subpuntos que no se reescribieron.
+
+    La recalificación del núcleo solo puede SUBIR la nota. Si el redactor se saltó
+    un subpunto —se observó saltarse justo el título, el peor calificado—, volver a
+    juzgar sus ítems contra un texto que no lo contiene le sube la nota por una
+    mejora que no existe. Lo correcto es que conserve la del barrido.
+    """
+    from backend.graph.nodes.redactor import _subpuntos_omitidos
+
+    omitidos = _subpuntos_omitidos(plan, texto_mejorado)
+    if not omitidos:
+        return items_rg
+
+    unidades = {_seccion_rubrica_para(s) or s for s in omitidos}
+    nums = {n for d in diagnosticos if d["unidad"] in unidades for n in (d.get("eval") or {})}
+    if not nums:
+        return items_rg
+    logger.info(f"[núcleo] Sin reescribir {omitidos} → sus ítems {sorted(nums)} "
+                f"conservan la nota del barrido")
+    return [it for it in items_rg if it["numero"] not in nums]
+
+
 def _contexto_nucleo(doc, nucleo: list[str]) -> tuple:
     """Arma el contexto combinado del núcleo (1 sola corrida de la red)."""
     from backend.rag import recuperar_contexto, recuperar_contexto_teorico
@@ -996,54 +1131,8 @@ def _titulo_rubrica_limpio(titulo: str) -> str:
     return t.replace("\\", "").strip(" .")
 
 
-def _contenido_seccion_juez(titulo: str, secciones_chunks: dict[str, list[str]],
-                            tope: int = 9000) -> str:
-    """Contenido REAL del proyecto para una sección de la rúbrica del juez.
-
-    Empareja el título de la rúbrica («7. Marco teórico (antecedentes y base teórica)»)
-    con las secciones del TOC por palabras clave y arrastra también sus DESCENDIENTES
-    por prefijo numérico. Antes se usaba solo una consulta semántica, que dejaba al
-    juez "ciego" ante secciones existentes (antecedentes, limitaciones) → notas 0 injustas.
-    """
-    from backend.config import _kw_seccion, _prefijo_num
-
-    kw_t = _kw_seccion(titulo)
-    if not kw_t or not secciones_chunks:
-        return ""
-
-    puntuadas: list[tuple[float, str]] = []
-    for sec in secciones_chunks:
-        kw_s = _kw_seccion(sec)
-        if not kw_s:
-            continue
-        inter = len(kw_t & kw_s)
-        if inter:
-            puntuadas.append((inter / len(kw_t | kw_s), sec))
-    if not puntuadas:
-        return ""
-    puntuadas.sort(reverse=True)
-    mejor_j = puntuadas[0][0]
-    # Secciones con match razonable (≥ mitad del mejor, mínimo 0.2) + sus descendientes.
-    elegidas: list[str] = []
-    for j, sec in puntuadas:
-        if j >= max(0.2, mejor_j * 0.5) and sec not in elegidas:
-            elegidas.append(sec)
-            pref = _prefijo_num(sec)
-            if pref:
-                for hijo in secciones_chunks:
-                    if hijo not in elegidas and _prefijo_num(hijo).startswith(pref + "."):
-                        elegidas.append(hijo)
-
-    partes: list[str] = []
-    for sec in elegidas:
-        cuerpo = "\n".join(secciones_chunks.get(sec) or []).strip()
-        if cuerpo:
-            partes.append(f"### {sec}\n{cuerpo}")
-    return "\n\n".join(partes)[:tope]
-
-
 def _calificar_por_tipo(doc, tipo: Optional[str], coherencia: str, cancelar: threading.Event,
-                        secciones_chunks: Optional[dict[str, list[str]]] = None):
+                        items_alcance: set[int] | None = None):
     """Generador: califica el proyecto con la rúbrica del TIPO vía LLM-as-judge (1 modelo).
 
     Itera las secciones de la rúbrica del tipo (cuanti→rubrica.md, cuali/mixto/tecnológico/
@@ -1053,6 +1142,7 @@ def _calificar_por_tipo(doc, tipo: Optional[str], coherencia: str, cancelar: thr
     {'tipo':'_cal', 'calificacion':..., 'por_seccion':...}.
     """
     import os
+    from backend import alcance as alcance_mod
     from evaluator.metrics.llm_judge import (
         cargar_rubrica_metodologica, _parsear_secciones_rubrica, _ejecutar_un_juez,
     )
@@ -1069,6 +1159,14 @@ def _calificar_por_tipo(doc, tipo: Optional[str], coherencia: str, cancelar: thr
         if cancelar.is_set():
             return
         titulo = _titulo_rubrica_limpio(titulo_raw)
+        # La métrica complementaria respeta el mismo alcance que la nota oficial:
+        # sin esto, el LLM-as-judge seguía puntuando capítulos que el estudiante
+        # no había declarado y el informe se contradecía a sí mismo. La
+        # equivalencia la resuelve `backend.alcance`, que conoce además las
+        # secciones propias de las rúbricas por tipo (artefacto, Lean Canvas,
+        # categorías apriorísticas…) sin equivalente en la plantilla UPAO.
+        if items_alcance is not None and not alcance_mod.seccion_tipo_en_alcance(doc, titulo):
+            continue
         yield {"tipo": "progreso", "detalle": f"Métrica — «{titulo}»…"}
         cont = _contenido_seccion_juez(titulo, secciones_chunks)
         if not cont:
@@ -1155,6 +1253,7 @@ def ejecutar_revision_completa(
              REALES del barrido + trazabilidad.
     """
     from .tipo_investigacion import obtener_tipo_diseno
+    from backend import alcance as alcance_mod
     from backend.enfoque import bloque_enfoque, ETIQUETAS, normalizar_tipo
     from backend.config import ESCALA_MAX, puntaje_a_nota
 
@@ -1162,6 +1261,13 @@ def ejecutar_revision_completa(
     tipo_inv, diseno = obtener_tipo_diseno(doc)
     enfoque = bloque_enfoque(tipo_inv, diseno)
     etiqueta_tipo = ETIQUETAS.get(normalizar_tipo(tipo_inv), "—")
+
+    # ALCANCE declarado: qué partes pidió evaluar el estudiante. Si no declaró
+    # nada, `items_alcance` cubre la rúbrica entera y todo se comporta como antes.
+    alcance_total = alcance_mod.es_total(doc)
+    items_alcance = None if alcance_total else alcance_mod.items_en_alcance(doc)
+    bloque_alcance = alcance_mod.bloque_prompt(doc)
+    grupos_alcance = (getattr(doc, "alcance", None) or {}).get("grupos") or []
 
     rubrica = getattr(doc, "rubrica", None)
     if rubrica and rubrica.get("items"):
@@ -1172,8 +1278,12 @@ def ejecutar_revision_completa(
         ausentes  = []
 
     # ── FASE 1: Calificación con la rúbrica UPAO (barrido por ítem, 0-ESCALA_MAX) ──
-    yield {"tipo": "fase", "fase": "barrido",
-           "detalle": "Fase 1/4 — Calificando con la rúbrica UPAO…"}
+    detalle_barrido = "Fase 1/4 — Calificando con la rúbrica UPAO…"
+    if not alcance_total:
+        detalle_barrido = (
+            f"Fase 1/4 — Calificando solo lo que elegiste: {', '.join(grupos_alcance).lower()}…"
+        )
+    yield {"tipo": "fase", "fase": "barrido", "detalle": detalle_barrido}
     unidades = _contenido_por_unidad_rubrica(doc)
     anclas = _anclas_por_item(rubrica) if (rubrica and rubrica.get("mapa_secciones")) else None
     coherencia = _digest_coherencia(unidades)
@@ -1187,8 +1297,17 @@ def ejecutar_revision_completa(
             return
         if sum(len(c) for c in u["chunks"]) < _MIN_CHARS_UNIDAD:
             continue
+        # Qué se va a calificar se resuelve ANTES de anunciarlo. Anunciar
+        # «Calificando «3.2 De acuerdo con la técnica de contrastación»…» a quien
+        # acaba de declarar que solo entrega título y planteamiento contradice el
+        # alcance que él mismo fijó (y encima esa unidad no tiene ítems que dar).
+        items_u = _items_calificables(u, rubrica, anclas, items_alcance)
+        if not items_u:
+            continue
         yield {"tipo": "progreso", "detalle": f"Calificando «{u['unidad']}»…"}
-        diag = _diagnosticar_unidad(llm, u, rubrica, enfoque, ESCALA_MAX, anclas, coherencia, cotejo)
+        diag = _diagnosticar_unidad(llm, u, rubrica, enfoque, ESCALA_MAX, anclas, coherencia,
+                                    tipo=tipo_inv, diseno=diseno, alcance=bloque_alcance,
+                                    items_alcance=items_alcance, items=items_u)
         if not diag:
             continue
         diagnosticos.append(diag)
@@ -1203,28 +1322,23 @@ def ejecutar_revision_completa(
         yield {"tipo": "diagnostico", "capitulo": diag["unidad"],
                "puntaje": prom, "debilidades": diag["debilidades"]}
     if not diagnosticos:
-        # Un callejón sin salida («no se pudo extraer contenido evaluable») no le dice
-        # al estudiante qué pasó ni qué hacer. El caso real más común es haber subido
-        # un PDF que no es el proyecto de tesis, así que se le devuelve lo que SÍ se
-        # detectó para que lo vea por sí mismo.
-        halladas = [u["unidad"] for u in unidades][:6]
-        if halladas:
-            detalle = (
-                "No pude evaluar este documento: detecté las secciones "
-                + ", ".join(f"«{h}»" for h in halladas)
-                + ", pero ninguna tiene texto suficiente para calificarla contra la rúbrica. "
-                "Suele pasar cuando el PDF no es el proyecto de tesis (por ejemplo, otro "
-                "informe), cuando es un índice o un borrador casi vacío, o cuando es un "
-                "escaneo sin texto seleccionable. Revisa que sea el archivo correcto."
-            )
+        # Antes esto era el callejón sin salida del sistema: cualquier documento
+        # sin secciones reconocibles moría aquí pese a tener texto. Ahora la
+        # estructura siempre produce secciones con nombre, así que si se llega
+        # hasta aquí es porque el alcance elegido no coincide con lo escrito, y
+        # eso se explica en vez de devolver un error opaco.
+        if not alcance_total:
+            yield {"tipo": "error", "detalle": (
+                f"No encontré contenido de las partes que elegiste evaluar "
+                f"({', '.join(grupos_alcance).lower()}). Revisa el alcance o dime "
+                "«evalúa todo el proyecto»."
+            )}
         else:
-            detalle = (
-                "No pude evaluar este documento: no encontré ninguna sección del proyecto "
-                "de tesis en él. Comprueba que subiste el PDF correcto y que no es un "
-                "escaneo de imágenes sin texto seleccionable."
-            )
-        yield {"tipo": "error", "detalle": detalle}
+            yield {"tipo": "error",
+                   "detalle": "No se pudo extraer contenido evaluable del documento."}
         return
+    calificacion = _consolidar_calificacion(diagnosticos, items_all, ausentes, ESCALA_MAX,
+                                            items_alcance)
 
     # RESCATE: ítems sin unidad detectada → búsqueda en TODO el documento antes de
     # marcarlos ausentes (numeración rota, contenido dentro de otra sección, etc.).
@@ -1246,8 +1360,7 @@ def ejecutar_revision_completa(
            "detalle": f"Fase 2/4 — Métrica LLM-as-judge (rúbrica {etiqueta_tipo})…"}
     metricas: Optional[dict] = None
     cal_juez: Optional[dict] = None
-    secciones_chunks = _chunks_por_seccion(doc)
-    for ev in _calificar_por_tipo(doc, tipo_inv, coherencia, cancelar, secciones_chunks):
+    for ev in _calificar_por_tipo(doc, tipo_inv, coherencia, cancelar, items_alcance):
         if ev["tipo"] == "_cal":
             cal_juez = ev["calificacion"]
         else:
@@ -1258,8 +1371,24 @@ def ejecutar_revision_completa(
     if cal_juez and cal_juez["items"]:
         metricas = {"tipo": etiqueta_tipo, "fuente": "LLM-as-judge", "calificacion": cal_juez}
 
-    yield {"tipo": "fase", "fase": "trazabilidad", "detalle": "Verificando trazabilidad global…"}
-    trazabilidad = _evaluar_trazabilidad(llm, unidades, enfoque)
+    # La trazabilidad compara título ↔ problema ↔ objetivos ↔ hipótesis ↔ método.
+    # Con un alcance parcial faltan extremos de esa cadena por definición, así que
+    # solo se verifica entre las partes declaradas y se omite si queda una sola:
+    # declarar «incoherente» lo que aún no está escrito sería un falso negativo.
+    unidades_alcance = [
+        u for u in unidades
+        if items_alcance is None or (set(_buscar_items_seccion(u["unidad"])) & items_alcance)
+    ]
+    nucleo_declarado = [u for u in unidades_alcance if _es_nucleo(u["unidad"])]
+    if len(nucleo_declarado) >= 2:
+        yield {"tipo": "fase", "fase": "trazabilidad", "detalle": "Verificando trazabilidad…"}
+        trazabilidad = _evaluar_trazabilidad(llm, unidades_alcance, enfoque)
+    else:
+        trazabilidad = {"coherente": True, "observaciones": (
+            "Aún no hay suficientes partes declaradas para verificar la trazabilidad "
+            "del proyecto. Cuando tengas problema, objetivos e hipótesis, pídeme que "
+            "revise la coherencia entre ellos."
+        ) if not alcance_total else ""}
 
     def _prom_unidad(d):
         aplic = [e["puntaje"] for e in d["eval"].values() if e.get("aplica", True)]
@@ -1267,6 +1396,10 @@ def ejecutar_revision_completa(
 
     # ── FASE 3: Núcleo (solo CORE: título·problema·objetivos·hipótesis·variables) ──
     nucleo = _secciones_nucleo(list(doc.estructura_toc or {}))
+    if items_alcance is not None:
+        # El núcleo solo reescribe lo declarado: reescribir un problema que el
+        # estudiante aún no ha redactado sería ponerle palabras en la boca.
+        nucleo = [s for s in nucleo if alcance_mod.seccion_en_alcance(doc, s)]
     resumenes: list[dict] = []
     nucleo_reescrito: list[str] = []
     if nucleo and any(_es_core(_seccion_rubrica_para(s) or s) for s in nucleo):
@@ -1282,8 +1415,13 @@ def ejecutar_revision_completa(
         nums_nucleo = _items_nucleo(items_all, rubrica, llm)
         eval_items, npts, nmax = [], 0.0, 0.0
         for it in calificacion["items"]:
-            # Los N/A por tipo ya llevan el puntaje máximo (no penalizan): entran a la
-            # tabla del núcleo con su razón, pero al estar en el máximo no se reescriben.
+            # «fuera_alcance» fuera: su puntaje es None y su máximo ESCALA_MAX, así
+            # que colarlos aquí inflaba el denominador con ítems que el estudiante
+            # excluyó (el panel mostraba «15/33» cuando lo declarado valía 21) y,
+            # peor, la recalificación del texto reescrito les regalaba el máximo:
+            # un «33/33» por hipótesis y variables que nadie escribió ni revisó.
+            if it["estado"] in ("na", "fuera_alcance"):
+                continue
             if it["numero"] in nums_nucleo:
                 eval_items.append({"item_numero": it["numero"], "criterio": it["descripcion"],
                                    "puntaje": it["puntaje"], "maximo": it["maximo"],
@@ -1339,7 +1477,14 @@ def ejecutar_revision_completa(
             # original); Final = mejor re-calificación. Con contexto de coherencia (los
             # ítems relacionales no se castigan por vivir en otro capítulo). Solo SUBE.
             texto_mej = (r0.get("texto_mejorado") or "").strip()
-            regrade = _recalificar(llm, items_rg, texto_mej, enfoque, ESCALA_MAX, coherencia) if texto_mej else {}
+            # Un subpunto que el redactor NO reescribió no se vuelve a calificar: la
+            # recalificación solo sube, así que juzgar el título contra un texto que
+            # no lo contiene le regalaba puntos por un arreglo que nunca ocurrió.
+            items_rg_iter = _items_sin_omitidos(items_rg, plan_iter, texto_mej, diagnosticos)
+            regrade = _recalificar(
+                llm, items_rg_iter, texto_mej, enfoque, ESCALA_MAX, coherencia,
+                seccion=seccion_nucleo, tipo=tipo_inv, diseno=diseno,
+            ) if texto_mej and items_rg_iter else {}
             eval_final, fpts, n_subieron, faltantes = [], 0.0, 0, []
             for it in eval_items:
                 fila = dict(it)
@@ -1394,13 +1539,16 @@ def ejecutar_revision_completa(
 
     diag_txt = "\n".join(
         f"- {it['descripcion']}: {it['puntaje']}/{it['maximo']}" if it["estado"] != "na"
-        else f"- {it['descripcion']}: {it['puntaje']}/{it['maximo']} "
-             "(no exigible por el tipo de investigación — máximo otorgado, no requiere acción)"
-        for it in calificacion["items"]
+        else f"- {it['descripcion']}: N/A (por tipo)"
+        # Los ítems fuera del alcance NO entran: colándolos, el informe ejecutivo
+        # recomendaba «desarrollar el marco metodológico» y «elaborar el cronograma»
+        # a un alumno que pidió revisar solo el planteamiento, y los presentaba como
+        # deficiencias cuando lo único cierto es que no se miraron.
+        for it in calificacion["items"] if it["estado"] != "fuera_alcance"
     )
     try:
         sintesis = llm.invoke([
-            SystemMessage(content=_PROMPT_SINTESIS),
+            SystemMessage(content=_PROMPT_SINTESIS.format(alcance=bloque_alcance or "")),
             HumanMessage(content=diag_txt[:6000]),
         ]).content
     except Exception as exc:
@@ -1416,12 +1564,30 @@ def ejecutar_revision_completa(
         if calificacion["maximo"] else None
     )
 
-    partes = [
-        f"# Calificación con la rúbrica UPAO: **{calificacion['puntaje']}/{calificacion['maximo']} pts**"
-        + (f" · nota vigesimal ≈ **{nota_vigesimal}/20**" if nota_vigesimal is not None else "")
-        + "\n",
-        sintesis,
-    ]
+    # Con alcance parcial la nota se informa SOBRE LO DECLARADO y se acompaña del
+    # avance real sobre los 33 ítems. Presentarla sin ese contexto haría creer al
+    # estudiante que ya tiene esa nota en la sustentación, que se califica entera.
+    evaluados = calificacion.get("items_evaluados", 0)
+    total_rubrica = calificacion.get("items_rubrica", 0)
+    if alcance_total:
+        encabezado = (
+            f"# Calificación con la rúbrica UPAO: **{calificacion['puntaje']}/{calificacion['maximo']} pts**"
+            + (f" · nota vigesimal ≈ **{nota_vigesimal}/20**" if nota_vigesimal is not None else "")
+            + "\n"
+        )
+    else:
+        pct = round(evaluados * 100 / total_rubrica) if total_rubrica else 0
+        encabezado = (
+            f"# Nota de lo que elegiste evaluar: **{calificacion['puntaje']}/{calificacion['maximo']} pts**"
+            + (f" · ≈ **{nota_vigesimal}/20**" if nota_vigesimal is not None else "")
+            + f"\n\n**Alcance de esta revisión:** {', '.join(grupos_alcance).lower()}.\n\n"
+            + f"**Avance sobre la rúbrica completa:** {evaluados} de {total_rubrica} ítems ({pct} %). "
+            + "Los ítems restantes no se calificaron y **no te restan**: quedan para cuando "
+            + "escribas esas partes. Esta nota mide solo lo que entregaste, no la nota final "
+            + "de la sustentación, que se calcula sobre los 33 ítems.\n"
+        )
+
+    partes = [encabezado, sintesis]
     if metricas:
         cj = metricas["calificacion"]
         partes.append(
@@ -1452,10 +1618,17 @@ def ejecutar_revision_completa(
             f"(p. ej. «revisa mi {sugeridas[0]}»):\n"
         )
         partes.extend(f"- {s}" for s in sugeridas)
-    if ausentes:
+    # Con alcance parcial, "ausente" solo tiene sentido dentro de lo declarado:
+    # listar los criterios de capítulos que el estudiante ni siquiera ha empezado
+    # sería devolverle la misma exigencia que el alcance venía a evitar.
+    ausentes_visibles = [
+        a for a in ausentes
+        if items_alcance is None or a["numero"] in items_alcance
+    ]
+    if ausentes_visibles:
         partes.append("\n---\n## Criterios de tu rúbrica que el proyecto aún no cubre")
         partes.append("Suman al puntaje máximo pero no hay una sección que los contenga; el jurado los espera:\n")
-        partes.extend(f"- **Ítem {a['numero']}:** {a['descripcion']}" for a in ausentes)
+        partes.extend(f"- **Ítem {a['numero']}:** {a['descripcion']}" for a in ausentes_visibles)
 
     informe = "\n".join(partes).strip()
 
@@ -1469,8 +1642,10 @@ def ejecutar_revision_completa(
     resumen_chat = {
         "tipo": "completa",
         "texto": (
-            f"Última REVISIÓN COMPLETA con la rúbrica UPAO: "
-            f"{calificacion['puntaje']}/{calificacion['maximo']} pts"
+            ("Última REVISIÓN COMPLETA con la rúbrica UPAO: " if alcance_total else
+             f"Última revisión con ALCANCE PARCIAL ({', '.join(grupos_alcance).lower()}) — "
+             "solo se calificó eso y el resto no resta: ")
+            + f"{calificacion['puntaje']}/{calificacion['maximo']} pts"
             + (f" (nota vigesimal ≈ {nota_vigesimal}/20)." if nota_vigesimal is not None else ".")
             + (f" Métrica complementaria ({etiqueta_tipo}, LLM-judge, mide corrección "
                f"metodológica, no la rúbrica UPAO): "
@@ -1481,7 +1656,8 @@ def ejecutar_revision_completa(
             + (f" Puntaje por sección: {_secc_txt}." if _secc_txt else "")
             + (f" Debilidades principales: {'; '.join(debilidades[:5])}." if debilidades else "")
             + (f" Criterios que el proyecto aún NO cubre: "
-               f"{', '.join('ítem ' + str(a['numero']) for a in ausentes)}." if ausentes else "")
+               f"{', '.join('ítem ' + str(a['numero']) for a in ausentes_visibles)}."
+               if ausentes_visibles else "")
             + (f" En el núcleo se reescribieron: {', '.join(nucleo_reescrito)}." if nucleo_reescrito else "")
         ),
     }
@@ -1491,6 +1667,12 @@ def ejecutar_revision_completa(
         "informe_md": informe,
         "calificacion": calificacion,
         "nota_vigesimal": nota_vigesimal,
+        "alcance": {
+            "total":            alcance_total,
+            "grupos":           grupos_alcance,
+            "items_evaluados":  calificacion.get("items_evaluados", 0),
+            "items_rubrica":    calificacion.get("items_rubrica", 0),
+        },
         "metricas": metricas,
         "resumen_chat": resumen_chat,
         "fortalezas": fortalezas[:6],

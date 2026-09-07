@@ -84,7 +84,10 @@ K_RESULTADOS  = 4
 K_INICIAL     = 6
 MAX_FRAGMENTOS_SECCION = 50
 
-_MIN_CHARS_CHUNK = 80
+# Umbral para descartar una sección que es solo su encabezado. Bajo a propósito:
+# en un avance incremental una hipótesis recién escrita ocupa poco más de 50
+# caracteres, y descartarla la hacía figurar como "ausente" en la rúbrica.
+_MIN_CHARS_CHUNK = 45
 
 
 
@@ -279,10 +282,19 @@ def construir_vector_store(
     estructura_toc: dict[str, int],
     embeddings: HuggingFaceEmbeddings,
     collection_name: str = "tesis_upao",
+    grupos: list[tuple[str, str, int]] | None = None,
 ) -> Chroma:
+    """Vectoriza el proyecto.
 
-    if not paginas:
-        raise ValueError("El texto extraído del PDF está vacío.")
+    `grupos` son las secciones ya resueltas por `backend.rag.estructura` (la
+    cascada estilos de Word → marcadores → encabezados → índice → semántica).
+    Cuando llegan, mandan: reconstruir la agrupación aquí a partir del índice
+    perdería la señal buena y era justo lo que dejaba fragmentos sin metadato
+    `seccion` —y por tanto sin ítems de rúbrica que evaluar—.
+    """
+
+    if not paginas and not grupos:
+        raise ValueError("El texto extraído del documento está vacío.")
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
@@ -291,7 +303,13 @@ def construir_vector_store(
         separators=["\n\n", "\n", ". ", "   ", " ", ""],
     )
 
-    if estructura_toc:
+    if grupos:
+        documentos = _secciones_a_documentos(grupos, collection_name, splitter)
+        logger.info(
+            f"Chunking por secciones resueltas: {len(grupos)} secciones → "
+            f"{len(documentos)} fragmentos"
+        )
+    elif estructura_toc:
         grupos = _agrupar_por_toc(paginas, estructura_toc)
         documentos = _secciones_a_documentos(grupos, collection_name, splitter)
         n_secciones = len(grupos)

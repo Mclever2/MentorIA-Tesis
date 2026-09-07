@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Award,
   CheckCircle2,
+  CircleDashed,
   Link2,
   MinusCircle,
   XCircle,
@@ -14,18 +15,21 @@ import { cn } from "@/lib/utils";
 import type { RevisionCompleta, RubricaItemEval } from "@/types";
 
 const ESTADO = {
-  ok:      { icon: CheckCircle2,  color: "text-[#34C759]", label: "Cumple" },
-  bajo:    { icon: AlertTriangle, color: "text-[#FF9500]", label: "Mejorable" },
-  // No exigible por el tipo de investigación → recibe el puntaje máximo (no penaliza).
-  na:      { icon: MinusCircle,   color: "text-[#34C759]", label: "No exigible (máx. otorgado)" },
-  ausente: { icon: XCircle,       color: "text-destructive", label: "Ausente" },
+  ok:      { icon: CheckCircle2,  color: "text-[#34C759]",        label: "Cumple" },
+  bajo:    { icon: AlertTriangle, color: "text-[#FF9500]",        label: "Mejorable" },
+  na:      { icon: MinusCircle,   color: "text-muted-foreground", label: "No aplica (tipo)" },
+  ausente: { icon: XCircle,       color: "text-destructive",      label: "Ausente" },
+  // El estudiante no pidió evaluar esta parte: se muestra apagado y sin puntaje
+  // para que quede claro que no entra en la nota ni en su contra.
+  fuera_alcance: { icon: CircleDashed, color: "text-muted-foreground", label: "No evaluado" },
 } as const;
 
 function Fila({ it }: { it: RubricaItemEval }) {
   const meta = ESTADO[it.estado] ?? ESTADO.bajo;
   const Icon = meta.icon;
+  const fuera = it.estado === "fuera_alcance";
   return (
-    <li className="py-2.5 border-b border-border/60 last:border-0">
+    <li className={cn("py-2.5 border-b border-border/60 last:border-0", fuera && "opacity-55")}>
       <div className="flex items-start gap-3">
         <span className="shrink-0 w-8 h-8 rounded-xl bg-muted grid place-items-center text-xs font-semibold">
           {String(it.numero).padStart(2, "0")}
@@ -57,8 +61,13 @@ export default function RevisionCompletaPanel({
   revision: RevisionCompleta;
   onCerrar: () => void;
 }) {
-  const { calificacion, nota_vigesimal, fortalezas, debilidades, trazabilidad } = revision;
+  const { calificacion, nota_vigesimal, fortalezas, debilidades, trazabilidad, alcance } = revision;
   const items = calificacion?.items ?? [];
+  // Con alcance parcial la nota es SOBRE LO DECLARADO: hay que decirlo, o el
+  // estudiante creerá que ésa es su nota de sustentación (que va sobre 33 ítems).
+  const parcial = alcance ? !alcance.total : false;
+  const evaluados = alcance?.items_evaluados ?? calificacion?.items_evaluados ?? items.length;
+  const totalRubrica = alcance?.items_rubrica ?? calificacion?.items_rubrica ?? items.length;
   const ratio = calificacion?.maximo ? calificacion.puntaje / calificacion.maximo : 0;
   const color =
     ratio >= 0.8 ? "text-[#34C759]" : ratio >= 0.5 ? "text-[#FF9500]" : "text-destructive";
@@ -76,19 +85,24 @@ export default function RevisionCompletaPanel({
             <ArrowLeft className="w-5 h-5" />
           </Button>
           <div className="min-w-0">
-            <h1 className="font-semibold text-lg">Calificación con la rúbrica UPAO</h1>
+            <h1 className="font-semibold text-lg">
+              {parcial ? "Calificación de lo que elegiste evaluar" : "Calificación con la rúbrica UPAO"}
+            </h1>
             <p className="text-xs text-muted-foreground">
-              {items.length} ítems evaluados · escala 0–3 por ítem
+              {evaluados} de {totalRubrica} ítems de la rúbrica · escala 0–3 por ítem
+              {parcial && alcance?.grupos?.length ? ` · ${alcance.grupos.join(", ").toLowerCase()}` : ""}
             </p>
           </div>
           <div className="ml-auto text-right">
-            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Total</div>
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              {parcial ? "Sobre lo entregado" : "Total"}
+            </div>
             <div className={cn("text-xl font-bold tabular-nums", color)}>
               {calificacion?.puntaje ?? 0}/{calificacion?.maximo ?? 0} pts
             </div>
             {nota_vigesimal != null && (
               <div className="text-[11px] text-muted-foreground tabular-nums">
-                nota vigesimal ≈ {nota_vigesimal}/20
+                {parcial ? "≈" : "nota vigesimal ≈"} {nota_vigesimal}/20
               </div>
             )}
           </div>
@@ -97,8 +111,20 @@ export default function RevisionCompletaPanel({
 
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-4xl px-5 py-6 space-y-5">
+          {parcial && (
+            <section className="rounded-3xl border border-primary/25 bg-primary/5 p-4">
+              <p className="text-sm">
+                <strong>Esta nota mide solo lo que entregaste.</strong> Has cubierto{" "}
+                <strong>{evaluados} de {totalRubrica}</strong> ítems de la rúbrica UPAO
+                {totalRubrica ? ` (${Math.round((evaluados * 100) / totalRubrica)} %)` : ""}. Los
+                ítems marcados «No evaluado» quedaron fuera del alcance que elegiste:{" "}
+                <strong>no restan</strong>. La nota de la sustentación se calcula sobre los{" "}
+                {totalRubrica} ítems, así que úsala como avance, no como nota final.
+              </p>
+            </section>
+          )}
           {trazabilidad && (
-            <section className="glass rounded-3xl p-5">
+            <section className="glass-scroll rounded-3xl p-5">
               <h2 className="font-semibold flex items-center gap-2 mb-2">
                 <Link2 className="w-4 h-4 text-primary" /> Trazabilidad
                 <span
@@ -118,7 +144,7 @@ export default function RevisionCompletaPanel({
 
           {(fortalezas?.length || debilidades?.length) ? (
             <div className="grid sm:grid-cols-2 gap-5">
-              <section className="glass rounded-3xl p-5">
+              <section className="glass-scroll rounded-3xl p-5">
                 <h2 className="font-semibold mb-2">Fortalezas</h2>
                 {fortalezas?.length ? (
                   <ul className="list-disc pl-5 text-[13px] space-y-1">
@@ -128,7 +154,7 @@ export default function RevisionCompletaPanel({
                   <p className="text-sm text-muted-foreground">—</p>
                 )}
               </section>
-              <section className="glass rounded-3xl p-5">
+              <section className="glass-scroll rounded-3xl p-5">
                 <h2 className="font-semibold mb-2">Debilidades</h2>
                 {debilidades?.length ? (
                   <ul className="list-disc pl-5 text-[13px] space-y-1">
@@ -141,7 +167,7 @@ export default function RevisionCompletaPanel({
             </div>
           ) : null}
 
-          <section className="glass rounded-3xl p-5">
+          <section className="glass-scroll rounded-3xl p-5">
             <h2 className="font-semibold flex items-center gap-2 mb-3">
               <Award className="w-4 h-4 text-primary" /> Calificación con la rúbrica UPAO · por ítem
             </h2>

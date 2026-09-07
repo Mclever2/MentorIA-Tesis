@@ -32,6 +32,11 @@ books/
 outputs/
 logs/
 *.log
+# Corpus del repositorio UPAO: se regenera en ~6 min con
+#   python -m scripts.cosechar_titulos_upao
+# (33 MB de metadatos publicos; no tiene sentido versionarlo)
+data/*.jsonl
+data/.cosecha_estado.json
 
 # ===== Supabase (se versiona el schema.sql, no los temporales) =====
 supabase/.branches/
@@ -48,3 +53,7 @@ supabase/.temp/
 Thumbs.db
 ehthumbs.db
 desktop.ini
+
+# Transcripciones de pruebas manuales de los paneles (no son parte del producto)
+PRUEBA_*.md
+_diag_*.md

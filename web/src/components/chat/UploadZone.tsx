@@ -1,18 +1,41 @@
 import { useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { FileUp, Loader2 } from "lucide-react";
+import { FileUp, Link2, Loader2 } from "lucide-react";
 
+import { FORMATOS_ACEPTADOS } from "@/components/chat/ChatInput";
 import { cn } from "@/lib/utils";
 
 interface UploadZoneProps {
   subiendo: boolean;
   etapa: string;
   onArchivo: (archivo: File) => void;
+  onEnlace?: (url: string) => void;
 }
 
-export default function UploadZone({ subiendo, etapa, onArchivo }: UploadZoneProps) {
+/** Extensiones que el backend indexa; el resto se rechaza antes de subir. */
+const EXTENSIONES = [".pdf", ".docx", ".txt", ".md", ".markdown"];
+
+const esAceptado = (archivo: File) =>
+  EXTENSIONES.some((ext) => archivo.name.toLowerCase().endsWith(ext));
+
+export default function UploadZone({ subiendo, etapa, onArchivo, onEnlace }: UploadZoneProps) {
   const [arrastrando, setArrastrando] = useState(false);
+  const [modoEnlace, setModoEnlace] = useState(false);
+  const [enlace, setEnlace] = useState("");
+  const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+
+  function elegir(archivo: File | undefined) {
+    if (!archivo) return;
+    if (!esAceptado(archivo)) {
+      setError(
+        "Ese formato no lo puedo leer. Sube tu proyecto en PDF, Word (.docx) o texto (.txt/.md).",
+      );
+      return;
+    }
+    setError("");
+    onArchivo(archivo);
+  }
 
   return (
     <motion.div
@@ -23,11 +46,10 @@ export default function UploadZone({ subiendo, etapa, onArchivo }: UploadZonePro
       <input
         ref={fileRef}
         type="file"
-        accept="application/pdf"
+        accept={FORMATOS_ACEPTADOS}
         className="hidden"
         onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onArchivo(f);
+          elegir(e.target.files?.[0]);
           e.target.value = "";
         }}
       />
@@ -42,8 +64,7 @@ export default function UploadZone({ subiendo, etapa, onArchivo }: UploadZonePro
         onDrop={(e) => {
           e.preventDefault();
           setArrastrando(false);
-          const f = e.dataTransfer.files?.[0];
-          if (f && f.type === "application/pdf") onArchivo(f);
+          elegir(e.dataTransfer.files?.[0]);
         }}
         className={cn(
           "w-full glass rounded-3xl px-8 py-10 text-center transition-all",
@@ -65,13 +86,54 @@ export default function UploadZone({ subiendo, etapa, onArchivo }: UploadZonePro
         ) : (
           <>
             <FileUp className="w-7 h-7 text-primary mx-auto" />
-            <p className="mt-3 font-medium">Arrastra tu proyecto de tesis (PDF)</p>
+            <p className="mt-3 font-medium">Arrastra tu proyecto de tesis</p>
             <p className="mt-1 text-sm text-muted-foreground">
-              o haz clic para seleccionarlo — detectaré su estructura automáticamente
+              PDF, Word (.docx) o texto — detectaré su estructura automáticamente
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              También puedes pegar el texto directamente en el chat, aunque sea solo un avance.
             </p>
           </>
         )}
       </button>
+
+      {!subiendo && onEnlace && (
+        <div className="mt-2 text-center">
+          {modoEnlace ? (
+            <div className="flex items-center gap-2 glass rounded-2xl px-3 py-2">
+              <Link2 className="w-4 h-4 text-muted-foreground shrink-0" />
+              <input
+                autoFocus
+                value={enlace}
+                onChange={(e) => setEnlace(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && enlace.trim()) onEnlace(enlace.trim());
+                  if (e.key === "Escape") setModoEnlace(false);
+                }}
+                placeholder="Pega el enlace de tu Google Doc (compartido como «cualquiera con el enlace»)"
+                className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+              />
+              <button
+                disabled={!enlace.trim()}
+                onClick={() => onEnlace(enlace.trim())}
+                className="text-sm font-medium text-primary disabled:opacity-40"
+              >
+                Importar
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setModoEnlace(true)}
+              className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5"
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              o importa desde un enlace de Google Docs
+            </button>
+          )}
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-center text-xs text-destructive">{error}</p>}
     </motion.div>
   );
 }
