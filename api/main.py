@@ -68,7 +68,23 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    """Estado + huella del código desplegado.
+
+    `corpus_tesis` y `compuertas` permiten comprobar de un vistazo si un redeploy
+    llevó realmente la versión nueva (si el corpus va en 0, el JSON no entró en la
+    imagen y los avisos de duplicidad quedarían mudos sin dar error).
+    """
+    try:
+        from backend.upao_tesis import corpus_tesis
+        from api.debate_rapido import _GRAFO
+        nodos = sorted(n for n in _GRAFO.get_graph().nodes if not n.startswith("__"))
+        return {
+            "status": "ok",
+            "corpus_tesis": len(corpus_tesis()),
+            "nodos_minigrafo": nodos,
+        }
+    except Exception as exc:  # nunca tumbar el health por el diagnóstico
+        return {"status": "ok", "diagnostico_error": str(exc)[:200]}
 
 
 @app.get("/api/biblioteca")
@@ -357,17 +373,21 @@ def rubrica_oficial(doc_id: str = "", user: dict = Depends(usuario_actual)):
         ESCALA_MAX,
         RUBRICA_GRUPOS_UPAO,
         RUBRICA_ITEMS_UPAO,
-        _buscar_items_seccion,
+        SECCION_ITEMS_MAP,
+        resolver_unidad_toc,
     )
 
     mapa_secciones: dict[str, list[int]] | None = None
     doc = registry.obtener_documento(doc_id) if doc_id else None
     if doc is not None and doc.user_id == user.get("sub", "anon") and doc.estructura_toc:
-        # Ítems por sección real del TOC; los encabezados de capítulo se omiten
-        # cuando el ítem ya tiene una subsección específica (evita duplicados).
+        # Ítems por sección real del TOC, con el MISMO resolver que usa la evaluación
+        # (TOC-consciente: subsecciones con match débil heredan la unidad del padre).
+        # Los encabezados de capítulo se omiten cuando el ítem ya tiene subsección.
+        toc = list(doc.estructura_toc)
         por_item: dict[int, list[str]] = {}
-        for sec in doc.estructura_toc:
-            for n in _buscar_items_seccion(sec):
+        for sec in toc:
+            unidad = resolver_unidad_toc(sec, toc)
+            for n in SECCION_ITEMS_MAP.get(unidad or "", []):
                 por_item.setdefault(n, []).append(sec)
         mapa_secciones = {}
         for n, secs in por_item.items():
@@ -446,7 +466,10 @@ def heartbeat(req: HeartbeatRequest, user: dict = Depends(usuario_actual)):
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
+    from concurrent.futures import ThreadPoolExecutor
+
     from .intent import interpretar_mensaje
+    from . import ficha as ficha_mod
     from . import mejoras, analytics
 
     user_id = user.get("sub", "anon")
@@ -462,6 +485,26 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
 
     historial = [t.model_dump() for t in req.historial]
 
+    # FICHA DEL PROYECTO. Se actualiza en un hilo aparte para que su llamada al LLM
+    # corra EN PARALELO con la clasificación de intención en vez de sumarse a ella:
+    # el turno no se hace más lento por tener memoria.
+    ficha_previa = ficha_mod.cargar(req.conversacion_id)
+    _pool = ThreadPoolExecutor(max_workers=1)
+    _fut_ficha = _pool.submit(ficha_mod.extraer_ficha, req.mensaje, historial, ficha_previa)
+
+    def _ficha_actual() -> dict:
+        """La ficha ya actualizada. Si la extracción tarda o falla, sigue con la
+        previa: perder un dato nuevo es recuperable, bloquear la respuesta no."""
+        try:
+            actualizada = _fut_ficha.result(timeout=25)
+        except Exception:
+            logger.warning("[chat] La extracción de ficha no llegó a tiempo; uso la previa.")
+            return ficha_previa
+        finally:
+            _pool.shutdown(wait=False)
+        ficha_mod.guardar(req.conversacion_id, actualizada)
+        return actualizada
+
     intencion = interpretar_mensaje(
         mensaje=req.mensaje,
         toc_nombres=toc_nombres,
@@ -470,6 +513,10 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
         historial=historial,
         vector_store=doc.vector_store if doc else None,
     )
+
+    # Se resuelve SIEMPRE, sea cual sea la ruta: la ficha se alimenta también de los
+    # turnos que acaban en revisión, y así el hilo de extracción siempre se cierra.
+    ficha_actual = _ficha_actual()
 
     if intencion["modo"] == "conversacion":
         from .conversador import responder_consulta
@@ -480,11 +527,17 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
             historial=historial,
             doc=doc,
             biblioteca=get_biblioteca(),
+            # También en los turnos de charla: es donde el estudiante suele soltar
+            # su tema y su problema por primera vez, y donde antes se perdían.
+            ficha=ficha_actual,
         )
         analytics.registrar_evento(
             user_id, analytics.CONSULTA_RAPIDA,
             conversacion_id=req.conversacion_id,
-            payload={"tiene_documento": doc is not None},
+            payload={
+                "tiene_documento": doc is not None,
+                "campos_ficha": len(ficha_mod.completos(ficha_actual)),
+            },
         )
         return {"tipo": "conversacion", "respuesta": respuesta}
 
@@ -587,8 +640,9 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
         return {"tipo": "conversacion", "respuesta": respuesta}
 
     if intencion["modo"] == "mejora":
-        # Mini-grafo de debate rápido (mejorar/corregir/redactar). Devuelve una
-        # respuesta de chat simple, SIN el panel de la red de evaluación.
+        # Mini-grafo multiagente (aclarar dudas / preguntar antes de redactar / redactar
+        # y mejorar). Devuelve una respuesta de chat simple, SIN el panel de la red de
+        # evaluación. `modo` dice qué ruta tomó el triaje del grafo.
         from .debate_rapido import responder_mejora_rapida
         from .deps import get_biblioteca
 
@@ -597,16 +651,19 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
             historial=historial,
             doc=doc,
             biblioteca=get_biblioteca(),
+            ficha=ficha_actual,
         )
         respuesta = res["respuesta"]
         sec = res.get("seccion")
         texto = (res.get("texto_mejorado") or "").strip()
-        # Guarda la mejora de sección como PENDIENTE (sin marcar evaluada): si luego dices
-        # «evalúa mi <sección>», la red puede calificar TU mejora en vez del texto original.
-        if doc is not None and sec and len(texto) > 200:
+        # Guarda la redacción de la sección como PENDIENTE (sin marcar evaluada): si luego
+        # dices «evalúa mi <sección>», la red puede calificar TU versión en vez del original.
+        # En los turnos de elicitación o de consulta no hay texto de tesis: no se guarda nada.
+        guardada = doc is not None and bool(sec) and len(texto) > 200
+        if guardada:
             mejoras.registrar_mejora_chat(doc, sec, texto)
             respuesta += (
-                f"\n\n---\n💡 Guardé esta versión mejorada de **{sec}**. Si quieres que la "
+                f"\n\n---\n💡 Guardé esta versión de **{sec}**. Si quieres que la "
                 f"evaluación formal la use en lugar de tu texto original, dime «evalúa mi {sec}» "
                 "y te preguntaré antes de aplicarla."
             )
@@ -614,7 +671,15 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
             user_id, analytics.MEJORA_RAPIDA,
             conversacion_id=req.conversacion_id,
             secciones=[sec] if sec else None,
-            payload={"texto_mejorado": bool(sec and len(texto) > 200)},
+            payload={
+                "texto_mejorado": guardada,
+                "modo_minigrafo": res.get("modo"),
+                # Para medir en la analítica de la tesis si el bucle de elicitación
+                # desaparece: cuántos datos tenía la ficha y cuántas tandas de
+                # preguntas seguidas llevaba el estudiante en este turno.
+                "campos_ficha": len(ficha_mod.completos(ficha_actual)),
+                "elicitaciones_previas": ficha_mod.elicitaciones_seguidas(historial),
+            },
         )
         return {"tipo": "conversacion", "respuesta": respuesta}
 
