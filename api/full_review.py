@@ -101,8 +101,11 @@ SECCIÓN EVALUADA: {seccion}
 _PROMPT_SINTESIS = """Eres el mentor académico principal. Con los diagnósticos por sección
 de un proyecto de tesis, redacta un informe ejecutivo BREVE en markdown y español con:
 1. "## Diagnóstico general" — 3-4 frases sobre el estado global del proyecto.
-2. "## Plan de acción recomendado" — 4-6 pasos concretos y priorizados.
+2. "## Plan de acción recomendado" — pasos concretos y priorizados, tantos como lo revisado dé:
+   con 1-2 partes revisadas, 2-3 pasos; con más, hasta 6. No rellenes con pasos genéricos.
 NO reescribas la tesis. NO inventes contenido que no esté en los diagnósticos.
+Si recomiendas algo sobre citas o referencias, la norma del programa es APA 7.ª edición: pídela a
+ella sola, no enumeres otras normas.
 Máximo ~300 palabras (la calificación por ítem se muestra aparte en una tabla).
 
 {alcance}
@@ -111,7 +114,11 @@ recibes los diagnósticos de esas. NO diagnostiques ni recomiendes nada sobre la
 están aquí —metodología, población, cronograma, presupuesto, referencias si no aparecen—: no es
 que estén mal, es que no tocaba revisarlas, y decirle que «faltan» o que «limitan el avance» es
 falso y lo desmotiva. Si crees que una parte ausente condiciona lo revisado, dilo en UNA frase
-como nota de secuencia, no como deficiencia."""
+como nota de secuencia, no como deficiencia.
+- Háblale al estudiante de TÚ («tu título», «te recomiendo»); nunca «el estudiante».
+- Los pasos del plan tratan SOLO lo revisado. Como máximo UN paso final puede ser la nota de
+  secuencia («cuando tengas X, …»); no encadenes pasos sobre marco teórico, cronograma, etc.
+- Menciona APA 7 solo si algún diagnóstico habla de citas o referencias."""
 
 _PROMPT_TRAZABILIDAD = """Eres un metodólogo. Verifica la TRAZABILIDAD del proyecto: que el tipo y
 diseño declarados concuerden entre sí y con el problema, objetivos, hipótesis y variables.
@@ -163,7 +170,59 @@ def _contenido_por_unidad_rubrica(doc) -> list[dict]:
             u["secciones_raw"].append(seccion_raw)
         u["chunks"].append(texto)
 
+    _depurar_unidad_titulo(doc, unidades)
     return sorted(unidades.values(), key=lambda u: u["orden"])
+
+
+_UNIDAD_TITULO = "1. Título del proyecto"
+_CARATULA = "Título del proyecto"
+
+
+def _depurar_unidad_titulo(doc, unidades: dict[str, dict]) -> None:
+    """La unidad del título lleva el TÍTULO, no la carátula entera.
+
+    La carátula trae universidad, autores, asesor, ORCID y el texto del formato;
+    al calificar y, sobre todo, al reescribir el «título», el redactor devolvía la
+    carátula completa con encabezados y sublíneas inventadas. Se sustituye por el
+    título detectado al indexar, manteniendo lo que el estudiante escribió en
+    «1. Título» y la línea/programa (evidencia del ítem 3).
+    """
+    u = unidades.get(_UNIDAD_TITULO)
+    if u is None:
+        return
+    u["chunks"] = _partes_unidad_titulo(doc, u["secciones_raw"])
+
+
+def _partes_unidad_titulo(doc, secciones_raw: list[str] | None = None) -> list[str]:
+    """Título detectado + lo escrito en «1. Título» y la línea/programa (sin carátula)."""
+    from backend.config import _seccion_rubrica_para
+
+    titulo = (getattr(doc, "titulo_proyecto", "") or "").strip()
+    result = doc.vector_store._collection.get(include=["metadatas", "documents"])
+    pares = sorted(
+        zip(result.get("metadatas") or [], result.get("documents") or []),
+        key=lambda md: (md[0] or {}).get("chunk_index", 0),
+    )
+    resto = []
+    for m, t in pares:
+        sec = (m or {}).get("seccion", "")
+        if sec == _CARATULA:
+            continue
+        if (secciones_raw is not None and sec in secciones_raw) or (
+                secciones_raw is None and _seccion_rubrica_para(sec) == _UNIDAD_TITULO):
+            if not re.match(r"^\s*1\.?\s*T[ií]tulo", sec):
+                # Línea / programa: evidencia del ítem 3, no texto que se reescriba.
+                t = f"[Contexto de la portada ({sec}); no forma parte del título ni se reescribe]\n{t}"
+            resto.append(t)
+    cabecera = (
+        f"Título del proyecto: {titulo}" if titulo else
+        "[El estudiante aún no ha escrito el título: la carátula conserva el texto del formato.]"
+    )
+    return [cabecera] + resto
+
+
+def _texto_unidad_titulo(doc) -> str:
+    return "\n\n".join(_partes_unidad_titulo(doc))
 
 
 def _norm_sec(s: str) -> str:
@@ -937,9 +996,20 @@ def _contexto_nucleo(doc, nucleo: list[str]) -> tuple:
     from .deps import get_biblioteca
 
     partes = []
+    titulo_puesto = False
     for sec in nucleo:
         try:
-            cont = recuperar_contexto(doc.vector_store, sec)
+            # El título por su texto depurado. El núcleo trae los nombres del índice
+            # («Título del proyecto» = la carátula, «1. Título»): recuperarlos traía
+            # la carátula entera y el redactor la devolvía reescrita —con sublíneas
+            # inventadas— como si fuera el título.
+            if _seccion_rubrica_para(sec) == _UNIDAD_TITULO:
+                if titulo_puesto:
+                    continue
+                titulo_puesto = True
+                cont = _texto_unidad_titulo(doc)
+            else:
+                cont = recuperar_contexto(doc.vector_store, sec)
         except Exception:
             cont = ""
         if cont and cont.strip():
@@ -1236,6 +1306,15 @@ def ejecutar_revision_completa(
     nucleo_reescrito: list[str] = []
     if nucleo and any(_es_core(_seccion_rubrica_para(s) or s) for s in nucleo):
         plan = _plan_nucleo(nucleo, diagnosticos, ESCALA_MAX, tope=8)
+        # Sin título escrito no hay título que «mejorar»: el redactor se inventaba uno
+        # completo (un proyecto de robótica industrial para quien no había escrito
+        # nada). Se le deja como pendiente del estudiante, con la guía en el informe.
+        if not (getattr(doc, "titulo_proyecto", "") or "").strip():
+            quitados = [s for s in plan.get("reescribir") or []
+                        if _seccion_rubrica_para(s) == _UNIDAD_TITULO]
+            if quitados:
+                plan["reescribir"] = [s for s in plan["reescribir"] if s not in quitados]
+                logger.info(f"[full_review] Sin título escrito: no se reescribe {quitados}")
         nucleo_reescrito = list(plan.get("reescribir") or [])
         _desc = {it["numero"]: it.get("descripcion", "") for it in items_all}
         _nums = sorted({num for d in diagnosticos if _es_core(d["unidad"]) for num in (d.get("eval") or {})})
@@ -1267,6 +1346,11 @@ def ejecutar_revision_completa(
         # SUBIÓ el número de iteraciones. Aplica SOLO al núcleo del grafo (el barrido por
         # ítem y el LLM-as-judge son de 1 pasada y no se tocan). Corte anticipado al ≥90%.
         max_iter_nucleo = max(1, min(3, max_iteraciones or 1))
+        # Plan vacío (p. ej. solo se declaró un título que aún no existe): sin nada que
+        # reescribir ni observar, el redactor recibiría la orden genérica de «mejorar
+        # todos los subpuntos» y se inventaría el proyecto. No se lanza.
+        if not plan.get("reescribir") and not plan.get("observar"):
+            max_iter_nucleo = 0
         det_iter = f" — hasta {max_iter_nucleo} iteraciones (corte al 90%)" if max_iter_nucleo > 1 else ""
         yield {"tipo": "fase", "fase": "profundizacion",
                "detalle": f"Fase 3/4 — La red reescribe los {n_re} subpunto(s) core del núcleo "
@@ -1379,7 +1463,22 @@ def ejecutar_revision_completa(
     )
     try:
         sintesis = llm.invoke([
-            SystemMessage(content=_PROMPT_SINTESIS.format(alcance=bloque_alcance or "")),
+            SystemMessage(content=_PROMPT_SINTESIS.format(alcance=bloque_alcance or "") + (
+                "\n\nHECHO VERIFICADO: el estudiante AÚN NO ha escrito el título de su proyecto (la "
+                "carátula conserva el texto del formato). No lo describas como claro, conciso ni de "
+                "ninguna otra forma: di que falta y que es lo primero que debe redactar."
+                if not (getattr(doc, "titulo_proyecto", "") or "").strip() else
+                f"\n\nTítulo del proyecto (tal como lo escribió): «{doc.titulo_proyecto}» "
+                f"({len(doc.titulo_proyecto.split())} palabras; el máximo UPAO es 20)."
+                + (" Como supera las 20 palabras, NO lo describas como conciso: di que es extenso."
+                   if len(doc.titulo_proyecto.split()) > 20 else "")
+            ) + (
+                "\n\nHECHO VERIFICADO: estas partes todavía tienen solo el texto de ejemplo del "
+                f"formato (no las ha redactado): {', '.join(doc.secciones_plantilla[:12])}. No las "
+                "trates como existentes (nada de «revisa/ajusta/asegúrate de que tus variables…»): "
+                "a lo sumo UN paso final que diga cuál conviene redactar primero."
+                if getattr(doc, "secciones_plantilla", None) else ""
+            )),
             HumanMessage(content=diag_txt[:6000]),
         ]).content
     except Exception as exc:

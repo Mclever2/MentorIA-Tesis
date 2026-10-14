@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -142,6 +142,7 @@ class EstadoIdeacion(TypedDict, total=False):
     historial: str
     programa: str
     evidencia_corpus: str
+    filas_repositorio: list[dict]
     libros: str
     fuentes_libros: list[str]
     problematizacion: dict
@@ -185,6 +186,11 @@ LO QUE EL ESTUDIANTE HA DICHO:
 
 CONVERSACIÓN PREVIA (para no repetir ni contradecir):
 {historial}
+
+TÍTULOS QUE YA LE PROPUSISTE EN ESTE HILO. Si hay alguno, es porque te pidió otros o te dio contexto
+nuevo: propón problemas DISTINTOS de estos, no versiones maquilladas de los mismos, y no repitas el
+mismo sector si ya lo descartó.
+{opciones_previas}
 
 TESIS REALES YA APROBADAS EN SU ESCUELA (repositorio institucional). Te dicen qué problemas se
 investigan de hecho en este programa y con qué enfoques; úsalas para calibrar el nivel y el alcance
@@ -280,6 +286,456 @@ teniendo un título usable en la mano.
   «ninguna es viable, reformula» es el peor resultado posible: es justo lo que no sabe hacer solo.
 - El siguiente paso debe ser una acción verificable de esta semana: a quién preguntar, qué registro
   pedir, qué medir. No «revisa la literatura»."""
+
+
+# ── Triage del turno: no todo mensaje pide el panel entero ───────────────────
+#
+# El panel de tres agentes es caro y, sobre todo, tiene UNA sola forma de
+# respuesta. Lanzarlo en cada turno hacía que una duda teórica («¿es necesario
+# acotar a un sector?») recibiera otra vez el mismo bloque de problemas,
+# opciones y veredictos: el estudiante lee dos respuestas casi idénticas y
+# concluye, con razón, que está hablando con una plantilla. Antes de armar nada
+# se decide qué necesita este turno.
+
+_RE_OPCION_PROPUESTA = re.compile(r"###\s*Opci[oó]n\s*\d+\s*[—–-]\s*«([^»]+)»")
+
+# Pedir otras opciones es lo único que el triage NO puede leer mal: si el
+# estudiante dice que ninguna le convence y el panel no se relanza, se queda sin
+# nada. Con opciones ya en el hilo el prompt tiende a ver «pregunta» en todo, así
+# que este caso se resuelve antes de consultar al modelo.
+_COSAS = r"(?:ideas?|opciones?|temas?|t[ií]tulos?|propuestas?|alternativas?)"
+_OTRAS = r"(?:otr[oa]s?|m[aá]s|nuev[oa]s?|distint[oa]s?|diferentes?)"
+_RE_PIDE_OTRAS = re.compile(
+    # «otras ideas» y «títulos diferentes»: el adjetivo va delante o detrás.
+    rf"{_OTRAS}\s+{_COSAS}|{_COSAS}\s+{_OTRAS}|"
+    # El rechazo cuenta solo si es a TODAS: «no me gusta la 2» no pide otra tanda,
+    # está eligiendo.
+    r"ningun[oa]s?\b[^.]{0,25}\bme\s+(?:convencen?|gustan?|cuadran?|sirven?)|"
+    r"no\s+me\s+(?:convencen|gustan|sirven|cuadran)\b",
+    re.I,
+)
+
+
+class SalidaTriage(BaseModel):
+    ruta: Literal["proponer", "pregunta", "elegir"] = Field(
+        description="Qué necesita el último mensaje del estudiante."
+    )
+    consulta_libros: str = Field(
+        default="",
+        description="Si la ruta NO es «proponer»: en qué buscar en los libros de metodología para "
+                    "responderle bien. Una frase con los términos metodológicos que aplican."
+    )
+    pregunta_pendiente: str = Field(
+        default="",
+        description="Si la ruta ES «proponer» pero además hizo una PREGUNTA que el panel de opciones "
+                    "no responde por sí solo, cópiala aquí tal como la hizo. Vacío si no preguntó nada."
+    )
+
+
+_PROMPT_TRIAGE = """\
+Eres el TRIAGE del panel de ideación de tema de tesis. NO respondes al estudiante: solo decides qué
+necesita su último mensaje.
+
+ÚLTIMO MENSAJE DEL ESTUDIANTE:
+{mensaje}
+
+CONVERSACIÓN PREVIA:
+{historial}
+
+OPCIONES QUE EL PANEL YA LE PROPUSO EN ESTE HILO:
+{opciones}
+
+LAS RUTAS:
+- "proponer": todavía no tiene opciones; o pide otras NUEVAS («dame otras ideas», «ninguna me
+  convence», «más opciones», «no me gusta ninguna»); o trae contexto nuevo (una empresa, un área, un
+  proceso concreto) sobre el que aún no se le ha propuesto nada. Solo aquí se arma el panel completo
+  de problemas, títulos y veredictos.
+- "pregunta": está preguntando algo. Una duda teórica o metodológica («¿hace falta acotar a un
+  sector?», «¿qué diferencia hay entre preexperimental y cuasiexperimental?»), una duda sobre alguna
+  de las opciones que ya recibió, o una corrección a lo que le respondiste («fue una pregunta
+  teórica», «no era eso lo que te pedí», «no quiero que me repitas lo mismo»).
+- "elegir": ya se quedó con una de las opciones y quiere avanzar con ella.
+
+REGLA DURA: si en este hilo ya recibió opciones y su mensaje no pide opciones NUEVAS ni aporta
+contexto nuevo, NO es "proponer". Volver a soltarle el mismo panel es el peor error posible: le
+confirma que está leyendo una plantilla y no a un mentor. Entre "proponer" y "pregunta", cuando ya
+hay opciones en el hilo, elige "pregunta".
+Esa regla NO se aplica cuando pide opciones nuevas o dice que ninguna le convence: ahí siempre es
+"proponer", porque negarle opciones lo deja sin nada."""
+
+
+_PROMPT_DIALOGO = """\
+Eres MentorIA, en medio de una conversación con un estudiante de tesis que está decidiendo su tema.
+Ahora mismo NO estás armando un panel de opciones: estás RESPONDIENDO a lo que te acaba de decir.
+
+{regla_voz}
+
+LO QUE TE ACABA DE DECIR — a esto respondes, y a nada más:
+{mensaje}
+
+CONVERSACIÓN PREVIA:
+{historial}
+
+OPCIONES QUE YA LE PROPUSISTE EN ESTE HILO (ya las tiene delante; refiérete a ellas por su nombre
+cuando venga al caso, pero NO las vuelvas a listar):
+{opciones}
+
+FUNDAMENTO METODOLÓGICO (fragmentos de los libros indexados del sistema). Apóyate en ellos y nombra
+el libro cuando lo uses; no inventes autores, teorías ni citas que no aparezcan aquí:
+{libros}
+
+TESIS YA APROBADAS EN SU ESCUELA (evidencia de lo que de hecho se acepta en este programa):
+{evidencia_corpus}
+
+{politica}
+
+{foco}
+
+CÓMO RESPONDES:
+- Responde lo que preguntó, y respóndelo con fundamento: la regla, de dónde sale y qué implica para
+  su caso. Una respuesta que un modelo cualquiera podría dar sin leer nada es una respuesta fallida.
+- NADA DE «SIEMPRE» NI DE «NUNCA» cuando la regla tiene casos. Si la respuesta depende de algo —de
+  dónde salen los datos, del tipo de estudio, del diseño—, ESO va en la PRIMERA frase: «depende de si
+  …». No abras con un «sí» rotundo para matizarlo tres párrafos después; el estudiante se queda con
+  la primera línea y se lleva la regla equivocada. Después desarrollas: cuándo es obligatorio, cuándo
+  solo recomendable y cuándo no aplica, con el criterio que separa un caso del otro. Ese criterio
+  está arriba; úsalo, no lo sustituyas por tu intuición.
+- CITA EL LIBRO por lo que DICE, no por que exista. Apoya al menos una afirmación en un fragmento de
+  arriba nombrando el libro y parafraseando la idea concreta que usas. «La claridad es clave según
+  X» no es una cita: no aporta nada que no supieras sin el libro. Si los fragmentos no dan para
+  sostener la respuesta, dilo en vez de inventar el respaldo.
+- APÓYATE EN LOS TÍTULOS REALES. Cuando la duda sea sobre la forma del título (si hace falta la
+  empresa, el sector, el año), cita uno o dos títulos aprobados de arriba y señala qué llevan y qué
+  no: es la prueba de que la regla se cumple en su escuela.
+- Si te está corrigiendo porque no respondiste lo que preguntaba («fue una pregunta teórica», «no era
+  eso»), su mensaje de ahora NO es la pregunta: búscala en la conversación previa, es el mensaje suyo
+  al que respondiste mal. Dale la razón en una línea, sin disculpas largas, y RESPONDE ESA pregunta
+  —completa, con criterio metodológico—, no la parafrasees ni le expliques por qué es importante.
+- NO propongas temas, problemas ni títulos nuevos, y NO reproduzcas la estructura del panel («Los
+  problemas que veo…», «Opción 1 —…», «Veredicto de viabilidad»). Eso ya se lo diste; repetirlo es
+  exactamente lo que hace que parezca una plantilla.
+- La extensión la marca la pregunta: una duda teórica se responde en tres o cuatro párrafos, con la
+  regla, su matiz y el ejemplo. Sin encabezados de sección; markdown solo si de verdad ayuda a leer.
+- No cierres con la lista de fuentes: eso se añade después, con los títulos a la vista.
+- Cierra pidiendo UNA sola cosa, y solo si de verdad la necesitas para seguir. Si no la necesitas, no
+  preguntes nada."""
+
+_FOCO_PREGUNTA = """\
+QUÉ TOCA EN ESTE TURNO:
+Responder su duda con criterio metodológico y aterrizarla a su caso: qué implica para el tema que
+está eligiendo. Termina de responder antes de sugerir cualquier otra cosa.
+Si la duda es sobre delimitar (sector, empresa, lugar, año), la respuesta útil no es sí ni no: es
+decirle en qué caso cae, qué le exige ese caso y qué pasaría si lo pone sin tenerlo —un año o una
+empresa que no puede sostener es una falsedad en la carátula, y el jurado pregunta por ella."""
+
+_FOCO_ELEGIR = """\
+QUÉ TOCA EN ESTE TURNO:
+Ya eligió. Confirma con cuál se queda, dile en una frase qué gana y qué pierde con esa elección, y
+qué le falta cerrar antes de escribir el planteamiento (el dato o el acceso que aún no tiene
+confirmado). Luego dile que el siguiente paso es construir la realidad problemática y la formulación
+del problema, y que te lo pida cuando quiera."""
+
+
+def _opciones_del_hilo(historial: list[dict] | None) -> list[str]:
+    """Títulos que el panel ya propuso en este hilo, para no repetirlos.
+
+    Se leen de las propias respuestas de MentorIA porque el hilo es lo único que
+    persiste entre turnos: el estado del panel no se guarda.
+    """
+    vistos: list[str] = []
+    for t in historial or []:
+        if t.get("rol") == "user":
+            continue
+        for m in _RE_OPCION_PROPUESTA.finditer(t.get("contenido") or ""):
+            titulo = m.group(1).strip()
+            if titulo and titulo not in vistos:
+                vistos.append(titulo)
+    return vistos
+
+
+def _triage(
+    modelo, mensaje: str, historial_txt: str, opciones: list[str]
+) -> tuple[str, str, str]:
+    """Decide si este turno pide el panel completo o una respuesta a secas.
+
+    Devuelve la ruta, la consulta con la que buscar en los libros y —cuando el
+    turno sí pide opciones pero además traía una pregunta— esa pregunta, que el
+    panel por sí solo no contesta.
+    """
+    if _RE_PIDE_OTRAS.search(mensaje or ""):
+        logger.info("[ideacion] Pide opciones nuevas → se arma el panel")
+        return "proponer", mensaje, ""
+
+    salida = _invocar(
+        _PROMPT_TRIAGE.format(
+            mensaje=mensaje or "(sin mensaje)",
+            historial=historial_txt,
+            opciones="\n".join(f"- «{t}»" for t in opciones) or "(ninguna todavía)",
+        ),
+        modelo, SalidaTriage,
+        "Clasifica qué necesita este turno.",
+    )
+    if salida is None:
+        # Sin clasificación fiable manda la evidencia del hilo: si ya se le
+        # entregaron opciones, repetirlas es peor que responderle de más.
+        return ("pregunta" if opciones else "proponer"), mensaje, ""
+    return salida.ruta, (salida.consulta_libros or mensaje), salida.pregunta_pendiente.strip()
+
+
+_PROMPT_PENDIENTE = """\
+El estudiante pidió temas de tesis y, en el mismo mensaje, preguntó otra cosa. El panel le va a
+responder lo que pidió; tú respondes SOLO la pregunta, y va delante del panel.
+
+{regla_voz}
+
+SU PREGUNTA:
+{pregunta}
+
+SU MENSAJE COMPLETO (contexto):
+{mensaje}
+
+FUNDAMENTO METODOLÓGICO (fragmentos de los libros indexados; no inventes autores ni teorías que no
+estén aquí):
+{libros}
+
+{politica}
+
+CÓMO RESPONDES:
+- Entre 120 y 180 palabras, dos párrafos, sin encabezados ni listas.
+- Nada de «siempre» ni de «nunca» si la regla tiene casos: si depende de algo, eso va en la PRIMERA
+  frase («depende de si…»), y luego dices qué exige cada caso, con el criterio que los separa. El de
+  arriba, no tu intuición.
+- Apoya la respuesta en uno de los fragmentos nombrando el libro ({libro_ejemplo}, por ejemplo) y
+  parafraseando lo que dice, no el hecho de que exista. Si los fragmentos no dan para sostenerla,
+  dilo en vez de inventarte el respaldo.
+- No propongas títulos ni temas: de eso se encarga lo que viene debajo. Cierra enlazando con ello en
+  media frase («con eso en mente, mira las opciones»), sin anunciar secciones."""
+
+
+def _responder_pendiente(modelo, pregunta: str, mensaje: str, biblioteca) -> str:
+    """Contesta la pregunta que venía pegada al pedido de temas.
+
+    Sin esto, un mensaje como «necesito ayuda con mi título, ¿hace falta acotar a
+    un sector?» recibía el panel entero y ni una palabra sobre lo preguntado.
+    """
+    libros_txt, fuentes = _libros(biblioteca, pregunta)
+    prompt = _PROMPT_PENDIENTE.format(
+        regla_voz=_REGLA_VOZ,
+        pregunta=pregunta,
+        mensaje=mensaje,
+        libros=libros_txt or "(sin fragmentos disponibles)",
+        libro_ejemplo=fuentes[0] if fuentes else "el libro que estés usando",
+        politica=_bloque_politica(),
+    )
+    return _texto_con_cita(modelo, prompt, pregunta, fuentes, bool(libros_txt))
+
+
+_AVISO_SIN_CITA = """\
+
+REESCRIBE LA RESPUESTA. La que ibas a dar no se apoyaba en ninguno de los fragmentos: no nombraba
+ningún libro. Vuelve a escribirla entera —igual de directa, sin alargarla— apoyando al menos una de
+sus afirmaciones en un fragmento concreto y nombrando el libro del que sale, con lo que ese libro
+dice, no con que exista. Si de verdad los fragmentos no cubren esta pregunta, escríbelo con esas
+palabras en vez de citar por citar."""
+
+
+def _norm_cita(s: str) -> str:
+    import unicodedata
+
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _firma_libro(fuente: str) -> str:
+    """La parte del nombre que identifica a ESE libro y no a cualquier otro.
+
+    Los cuatro libros empiezan igual («METODOLOGÍA DE LA INVESTIGACIÓN…»), que
+    además es una frase corriente en español: buscar ese prefijo daba por citado
+    cualquier texto que dijera «metodología de la investigación» de pasada. Lo
+    que distingue a cada uno es lo que va tras el guion.
+    """
+    cola = _norm_cita(fuente.rsplit("-", 1)[-1])
+    return cola[:25] if len(cola) >= 12 else _norm_cita(fuente)[:25]
+
+
+def _cita_algun_libro(texto: str, fuentes: list[str]) -> bool:
+    """¿La respuesta nombra alguno de los libros que se le pasaron?
+
+    Sin este chequeo, la instrucción de citar se cumplía a ratos: el modelo daba
+    una respuesta correcta pero indistinguible de la de cualquier chat, que es
+    justo lo que el sistema tiene que superar.
+    """
+    t = _norm_cita(texto)
+    return any(_firma_libro(f) in t for f in fuentes if len(f) >= 10)
+
+
+def _texto_con_cita(
+    modelo, prompt: str, mensaje: str, fuentes: list[str], hay_fragmentos: bool
+) -> str:
+    """Invoca al modelo y, si no citó ningún libro habiéndolos, le da una segunda pasada."""
+    def _invocar_texto(sistema: str) -> str:
+        try:
+            return modelo.invoke(
+                [SystemMessage(content=sistema), HumanMessage(content=mensaje)]
+            ).content.strip()
+        except Exception as exc:                               # noqa: BLE001
+            logger.warning(f"[ideacion] Respuesta en prosa falló: {exc}")
+            return ""
+
+    texto = _invocar_texto(prompt)
+    if not texto or not fuentes or not hay_fragmentos:
+        return texto
+    if _cita_algun_libro(texto, fuentes):
+        return texto
+
+    logger.info("[ideacion] La respuesta no citaba ningún libro; se pide de nuevo con la cita")
+    segundo = _invocar_texto(prompt + _AVISO_SIN_CITA)
+    return segundo or texto
+
+
+def _dialogar(
+    modelo, mensaje: str, historial_txt: str, opciones: list[str],
+    biblioteca, programa: str, consulta: str, ruta: str,
+) -> str:
+    """Responde dentro del hilo de ideación, sin volver a montar el panel."""
+    libros_txt, fuentes = _libros(biblioteca, consulta or mensaje)
+    evidencia, filas = _evidencia_repositorio(consulta or mensaje, programa)
+
+    prompt = _PROMPT_DIALOGO.format(
+        regla_voz=_REGLA_VOZ,
+        mensaje=mensaje,
+        historial=historial_txt,
+        opciones="\n".join(f"- «{t}»" for t in opciones) or "(ninguna todavía)",
+        libros=libros_txt or "(sin fragmentos disponibles)",
+        libro_ejemplo=fuentes[0] if fuentes else "el libro que estés usando",
+        evidencia_corpus=evidencia or "(el repositorio no está disponible en este momento)",
+        politica=_bloque_politica(),
+        foco=_FOCO_ELEGIR if ruta == "elegir" else _FOCO_PREGUNTA,
+    )
+    texto = _texto_con_cita(modelo, prompt, mensaje, fuentes, bool(libros_txt))
+    if not texto:
+        return ""
+
+    pie = _pie_fuentes(fuentes, filas, programa)
+    return f"{texto}\n\n{pie}" if pie else texto
+
+
+_MAX_TITULOS_VISIBLES = 5
+
+
+def _bloque_politica() -> str:
+    """Cuándo el título DEBE delimitar y cuándo no, según de dónde salgan los datos.
+
+    «¿Tengo que aplicarlo a un sector?» no se responde con un sí: depende de si
+    el estudio recoge datos de una población real o se entrena sobre un dataset.
+    Los dos casos salen del mismo motor de reglas que usa la evaluación
+    (`politica_delimitacion`), para que el chat no diga una cosa y la rúbrica otra.
+    """
+    try:
+        from backend.titulo import politica_delimitacion
+
+        campo = politica_delimitacion(
+            "tecnologica", None,
+            "la solución se valida con la población de usuarios de una empresa concreta",
+        )
+        dataset = politica_delimitacion(
+            "tecnologica", None,
+            "el modelo se entrena y evalúa sobre un dataset público de datos secundarios",
+        )
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning(f"[ideacion] Política de delimitación no disponible: {exc}")
+        return ""
+
+    return (
+        "QUÉ EXIGE DELIMITAR EL TÍTULO — la regla del sistema, que NO es «siempre». Depende de\n"
+        "dónde salgan los datos, y por eso la respuesta se da distinguiendo los dos casos:\n\n"
+        "CASO A — el estudio recoge datos de una organización o población real (se implanta, se\n"
+        "encuesta, se mide en campo):\n"
+        f"{campo.bloque()}\n\n"
+        "CASO B — el modelo se entrena y evalúa sobre un dataset público, un benchmark o en\n"
+        "laboratorio, sin una organización que lo adopte:\n"
+        f"{dataset.bloque()}"
+    )
+
+
+def _delimitacion_legible(titulo: str) -> str:
+    """Qué delimita de hecho un título aprobado: lugar, periodo, ambos o ninguno.
+
+    Es el dato que el estudiante necesita para decidir si SU título tiene que
+    llevar empresa o año: no la regla enunciada, sino qué hicieron los que ya
+    pasaron por el jurado.
+    """
+    from backend.titulo import contar_palabras_titulo, diagnosticar_titulo
+
+    d = diagnosticar_titulo(titulo)
+    # Las marcas espaciales van completas: el detector se queda con la primera
+    # coincidencia de cada tipo y a veces la primera es genérica («laboratorio»)
+    # mientras el nombre real («Trujillo») viene después.
+    lleva = d.marcas_espacio[:2] + d.marcas_tiempo[:1]
+    falta = []
+    if not d.tiene_espacio:
+        falta.append("sin lugar ni institución")
+    if not d.tiene_tiempo:
+        falta.append("sin año ni periodo")
+
+    partes = []
+    if lleva:
+        partes.append("lleva " + " y ".join(lleva))
+    if falta:
+        partes.append(", ".join(falta))
+    partes.append(f"{contar_palabras_titulo(titulo)} palabras")
+    return "; ".join(partes)
+
+
+def _estadistica_delimitacion(programa: str = "") -> str:
+    """Cuántas de las tesis aprobadas llevan de hecho lugar y periodo."""
+    try:
+        from backend.rag.titulos_store import estadisticas_delimitacion
+
+        est = estadisticas_delimitacion(programa=programa or None)
+        return est.resumen() if est.n else ""
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning(f"[ideacion] Estadística de delimitación no disponible: {exc}")
+        return ""
+
+
+def _pie_fuentes(
+    fuentes: list[str], filas: list[dict] | None = None, programa: str = ""
+) -> str:
+    """La evidencia, mostrada: los títulos reales y qué delimita cada uno.
+
+    Antes esto era una línea que decía «consulté 8 tesis y 2 libros», que el
+    estudiante no puede verificar ni aprovechar. Viendo los títulos aprobados —y
+    si llevan empresa, lugar o año— puede decidir por comparación si el suyo
+    necesita esa delimitación, que es justo la duda que trae.
+    """
+    bloques: list[str] = []
+
+    for f in (filas or [])[:_MAX_TITULOS_VISIBLES]:
+        titulo = (f.get("titulo") or "").strip()
+        if not titulo:
+            continue
+        if not bloques:
+            bloques.append(
+                "**Las tesis aprobadas en las que me apoyé** — fíjate en cómo están delimitadas:"
+            )
+        anio = f" ({f['anio']})" if f.get("anio") else ""
+        enlace = f"[«{titulo}»]({f['url']})" if f.get("url") else f"«{titulo}»"
+        bloques.append(f"{len(bloques)}. {enlace}{anio} — {_delimitacion_legible(titulo)}")
+
+    est = _estadistica_delimitacion(programa)
+    if est and bloques:
+        bloques.append(est)
+
+    if fuentes:
+        # Sin recortar a mitad de palabra: el nombre truncado del libro
+        # («…CUANTITATIVA, CUAL») no acredita nada, que es para lo que está.
+        plural = "Libros de metodología consultados" if len(fuentes) > 1 else "Libro de metodología consultado"
+        bloques.append(f"**{plural}:** {', '.join(fuentes)}.")
+
+    if not bloques:
+        return ""
+    return "---\n\n" + "\n\n".join(bloques)
 
 
 # ── Saneado determinista de los títulos propuestos ──────────────────────────
@@ -506,19 +962,23 @@ def _libros(biblioteca, consulta: str) -> tuple[str, list[str]]:
     return "\n\n---\n\n".join(partes), fuentes
 
 
-def _evidencia_repositorio(tema: str, programa: str) -> tuple[str, int]:
-    """Títulos reales de la escuela + estadística de delimitación."""
+def _evidencia_repositorio(tema: str, programa: str) -> tuple[str, list[dict]]:
+    """Títulos reales de la escuela + estadística de delimitación.
+
+    Devuelve también las FILAS, no solo el bloque para el prompt: al estudiante
+    hay que enseñarle los títulos, no decirle que se consultaron.
+    """
     try:
         from backend.rag.titulos_store import buscar_titulos_similares, contexto_titulos
         from .deps import get_embeddings
 
         emb = get_embeddings()
         texto = contexto_titulos(emb, tema=tema, programa=programa or None, k=8)
-        n = len(buscar_titulos_similares(emb, tema, k=8, programa=programa or None))
-        return texto, n
+        filas = buscar_titulos_similares(emb, tema, k=8, programa=programa or None)
+        return texto, filas
     except Exception as exc:                                   # noqa: BLE001
         logger.warning(f"[ideacion] Evidencia del repositorio no disponible: {exc}")
-        return "", 0
+        return "", []
 
 
 # ── Nodos ───────────────────────────────────────────────────────────────────
@@ -626,20 +1086,13 @@ def _componer(estado: EstadoIdeacion) -> str:
             + "\n".join(f"- {p}" for p in preguntas)
         )
 
-    # Trazabilidad del conocimiento usado: el estudiante (y el asesor) pueden ver
-    # sobre qué se apoyó la recomendación, en vez de tener que confiar a ciegas.
-    fuentes = estado.get("fuentes_libros") or []
-    n_rep = estado.get("n_repositorio") or 0
-    if fuentes or n_rep:
-        detalle = []
-        if n_rep:
-            detalle.append(f"{n_rep} tesis aprobadas de tu escuela en el repositorio UPAO")
-        if fuentes:
-            # Sin recortar a mitad de palabra: el nombre truncado del libro
-            # («…CUANTITATIVA, CUAL») no acredita nada, que es para lo que está.
-            plural = "libros" if len(fuentes) > 1 else "libro"
-            detalle.append(f"{len(fuentes)} {plural} de metodología: {', '.join(fuentes)}")
-        partes.append("---\n\n_Consulté " + " y ".join(detalle) + "._")
+    pie = _pie_fuentes(
+        estado.get("fuentes_libros") or [],
+        estado.get("filas_repositorio") or [],
+        estado.get("programa") or "",
+    )
+    if pie:
+        partes.append(pie)
 
     return "\n\n".join(partes).strip()
 
@@ -787,7 +1240,24 @@ def responder_ideacion(mensaje: str, historial: list[dict], doc, biblioteca) -> 
             logger.info(f"[ideacion] Orientación inicial con {len(titulos)} títulos del repositorio")
             return {"respuesta": respuesta, "titulo": "", "seccion": None}
 
-    evidencia, n_rep = _evidencia_repositorio(interes or mensaje, programa)
+    # Estar en el hilo de ideación no significa querer otra tanda de opciones. Una
+    # duda teórica, una corrección o un «me quedo con la segunda» se responden
+    # hablando; montar el panel otra vez devolvía una respuesta casi idéntica a la
+    # anterior, que es justo lo que hace que el sistema parezca precacheado.
+    historial_txt = _historial_texto(historial)
+    opciones_previas = _opciones_del_hilo(historial)
+    ruta, consulta, pendiente = _triage(modelo, mensaje, historial_txt, opciones_previas)
+    if ruta in ("pregunta", "elegir"):
+        respuesta = _dialogar(
+            modelo, mensaje, historial_txt, opciones_previas,
+            biblioteca, programa, consulta, ruta,
+        )
+        if respuesta:
+            logger.info(f"[ideacion] Turno resuelto como '{ruta}' (sin relanzar el panel)")
+            return {"respuesta": respuesta, "titulo": "", "seccion": None}
+        logger.info(f"[ideacion] El diálogo '{ruta}' no produjo respuesta; se arma el panel")
+
+    evidencia, filas_rep = _evidencia_repositorio(interes or mensaje, programa)
     libros_txt, fuentes = _libros(
         biblioteca,
         f"planteamiento del problema variables tipo y diseño de investigación instrumentos "
@@ -796,13 +1266,13 @@ def responder_ideacion(mensaje: str, historial: list[dict], doc, biblioteca) -> 
 
     estado: EstadoIdeacion = {
         "interes": interes or mensaje,
-        "historial": _historial_texto(historial),
+        "historial": historial_txt,
         "programa": programa,
         "evidencia_corpus": evidencia or "(el repositorio no está disponible en este momento)",
         "libros": libros_txt or "(sin fragmentos disponibles)",
         "fuentes_libros": fuentes,
     }
-    estado["n_repositorio"] = n_rep                              # type: ignore[typeddict-unknown-key]
+    estado["filas_repositorio"] = filas_rep                      # type: ignore[typeddict-unknown-key]
 
     p = _invocar(
         _PROMPT_PROBLEMATIZADOR.format(
@@ -810,6 +1280,7 @@ def responder_ideacion(mensaje: str, historial: list[dict], doc, biblioteca) -> 
             regla_orden=_REGLA_ORDEN,
             interes=estado["interes"],
             historial=estado["historial"],
+            opciones_previas="\n".join(f"- «{t}»" for t in opciones_previas) or "(ninguno)",
             evidencia_corpus=estado["evidencia_corpus"],
             libros=estado["libros"],
         ),
@@ -866,6 +1337,13 @@ def responder_ideacion(mensaje: str, historial: list[dict], doc, biblioteca) -> 
         estado["auditoria"] = _sanear_veredictos(modelo, a.model_dump() if a else {})
 
     respuesta = _componer(estado)
+    # Si además de pedir temas preguntó algo, se le contesta ANTES del panel: el
+    # panel no tiene dónde meter esa respuesta y quedaba sin contestar.
+    if respuesta and pendiente:
+        previa = _responder_pendiente(modelo, pendiente, mensaje, biblioteca)
+        if previa:
+            logger.info("[ideacion] Pregunta del mensaje respondida antes del panel")
+            respuesta = f"{previa}\n\n{respuesta}"
     if not respuesta:
         return {"respuesta": _FALLBACK, "titulo": "", "seccion": None}
 
@@ -875,7 +1353,7 @@ def responder_ideacion(mensaje: str, historial: list[dict], doc, biblioteca) -> 
     logger.info(
         f"[ideacion] {len(estado['problematizacion'].get('problemas') or [])} problemas, "
         f"{len(estado['disenos'].get('candidatos') or [])} diseños, "
-        f"{n_rep} títulos del repositorio, {len(fuentes)} libros"
+        f"{len(filas_rep)} títulos del repositorio, {len(fuentes)} libros"
     )
     return {"respuesta": respuesta, "titulo": recomendado, "seccion": None}
 

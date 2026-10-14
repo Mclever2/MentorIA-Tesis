@@ -198,6 +198,8 @@ def make_nodo_redactor(llm: ChatOpenAI):
                     f"No hay retoques de pulido adicionales."
                 )
 
+            if es_titulo:
+                texto_final = _recortar_titulo(texto_final)
             # Aun en pulido, el título UPAO no puede exceder 20 palabras.
             if es_titulo and es_upao:
                 n_pal = _palabras_titulo(texto_final)
@@ -386,6 +388,30 @@ def make_nodo_redactor(llm: ChatOpenAI):
         # las hipótesis, que ya estaban en su máximo: el estudiante recibe cambios
         # que no necesita y sigue sin el arreglo que sí necesitaba.
         if modo_nucleo:
+            texto_final = _solo_bloques_del_plan(texto_final, state.get("nucleo_plan"))
+            _ctx_citas = "\n".join((state.get("contexto_recuperado") or "",
+                                    state.get("contexto_dependencias") or ""))
+            texto_final = _sin_citas_ajenas(texto_final, _ctx_citas)
+            texto_final = _anios_del_proyecto_en_titulo(texto_final, _ctx_citas)
+            if sugerencias_escritor:
+                sugerencias_escritor = _sin_citas_ajenas(sugerencias_escritor, _ctx_citas)
+            # Los «cambios realizados» no pueden describir bloques que se descartaron.
+            if sugerencias_escritor:
+                sugerencias_escritor = "\n".join(
+                    l for l in sugerencias_escritor.split("\n") if not _RE_CAMBIO_PORTADA.match(l)
+                ).strip() or None
+            if es_upao and _palabras_titulo_nucleo(texto_final) > 20:
+                texto_final = _acortar_titulo_nucleo(llm, texto_final)
+            n_tit = _palabras_titulo_nucleo(texto_final)
+            if es_upao and n_tit > 20:
+                aviso_tit = (
+                    f"**Atención:** el título propuesto aún tiene {n_tit} palabras; UPAO exige máximo "
+                    "20 (incluyendo conectores y fechas). Recórtalo conservando las variables y la "
+                    "unidad de análisis."
+                )
+                sugerencias_escritor = (
+                    f"{sugerencias_escritor}\n\n{aviso_tit}" if sugerencias_escritor else aviso_tit
+                )
             faltantes = _subpuntos_omitidos(state.get("nucleo_plan"), texto_final)
             if faltantes:
                 aviso = (
@@ -430,6 +456,12 @@ def make_nodo_redactor(llm: ChatOpenAI):
         # El LLM puede argumentar bien y aun así entregar un título de 24 palabras o sin
         # la unidad de análisis; esto se verifica fuera del modelo.
         if es_titulo and texto_final:
+            # Solo el título: el modelo arrastraba la línea de investigación con una
+            # «sublínea» inventada, o el tipo de investigación, como si fueran parte
+            # del texto mejorado.
+            texto_final = _recortar_titulo(texto_final)
+            if es_upao and _palabras_titulo(texto_final) > 20:
+                texto_final = _acortar_titulo(llm, texto_final)
             avisos = _avisos_titulo(
                 texto_final,
                 tipo_investigacion=state.get("tipo_investigacion"),
@@ -523,6 +555,209 @@ def _avisos_titulo(
     return "\n\n".join(avisos)
 
 
+# Donde acaba el título en un texto mejorado: lo que sigue (línea, sublínea, tipo
+# de investigación, unidad académica) es de la portada y no se reescribe.
+_RE_FIN_TITULO = re.compile(
+    r"(?im)(?:^\s*(?:#+\s*)?(?:\d+(?:\.\d+)*\.?\s*)?"
+    r"(?:l[ií]nea\s+de\s+investigaci|sub\s*-?\s*l[ií]nea|tipo\s+de\s+investigaci|"
+    r"unidad\s+acad[eé]mica|programa\s+de\s+estudio)"
+    r"|\s(?:sub\s*-?\s*)?l[ií]nea\s+de\s+investigaci[oó]n\s*:"
+    r"|\[\s*contexto\s+de\s+la\s+portada)"
+)
+
+
+def _recortar_titulo(texto: str) -> str:
+    """Deja solo el título: corta donde empieza la línea/sublínea, el tipo o la unidad.
+
+    Se normaliza a NFC porque el texto del PDF trae a veces la tilde descompuesta
+    («i» + acento combinado) y así «Línea» no casaba con el patrón.
+    """
+    t = unicodedata.normalize("NFC", texto or "")
+    return _RE_FIN_TITULO.split(t, maxsplit=1)[0].strip() or t
+
+
+# Líneas de «cambios realizados» sobre la portada (línea, sublínea, tipo, unidad):
+# nunca son subpuntos del núcleo, así que describen cambios que no se entregan.
+_RE_CAMBIO_PORTADA = re.compile(
+    r"(?i)^\s*(?:\d+[.)]\s*|[-•*]\s*)?\**\s*(?:\d+(?:\.\d+)*\.?\s*)?"
+    r"(?:sub\s*-?\s*)?(?:l[ií]nea\s+de\s+investigaci|subl[ií]nea|tipo\s+de\s+investigaci|"
+    r"unidad\s+acad[eé]mica|programa\s+de\s+estudio)"
+)
+
+
+_PROMPT_ACORTAR_TITULO = """Eres asesor de tesis de Ingeniería en la UPAO. Este título tiene {n} palabras y el \
+máximo es 20 (contando conectores y fechas). Reescríbelo en 20 palabras o menos:
+- conserva la variable independiente (lo que se construye o aplica), la dependiente (lo que se mide o \
+mejora), la unidad de análisis y OBLIGATORIAMENTE el lugar o la institución (p. ej. «UPAO», una ciudad o \
+una empresa) y el periodo si aparecen: quitarlos le baja la nota por falta de delimitación;
+- quita redundancias, subtítulos repetidos y siglas duplicadas;
+- NO añadas temas, lugares, fechas ni variables que no estén en el título original;
+- solo mayúscula inicial y nombres propios, sin comillas.
+Responde SOLO con el título, en una línea.
+
+TÍTULO ORIGINAL:
+{titulo}"""
+
+
+def _acortar_titulo(llm, titulo: str, intentos: int = 2) -> str:
+    """Pide al modelo SOLO acortar el título hasta ≤20 palabras y lo verifica.
+
+    Con títulos largos el redactor devolvía casi el mismo texto (43 palabras) y
+    afirmaba haberlo simplificado. Aquí la condición se comprueba fuera del modelo;
+    si no lo consigue, se devuelve el original y el aviso de longitud se mantiene.
+    """
+    etiqueta = ""
+    m = re.match(r"^\s*(t[ií]tulo(?:\s+del\s+proyecto)?\s*:\s*)", titulo, re.I)
+    if m:
+        etiqueta, titulo = m.group(1), titulo[m.end():]
+    actual = titulo.strip()
+    for _ in range(intentos):
+        n = _palabras_titulo(actual)
+        if n <= 20:
+            break
+        try:
+            resp = llm.invoke(_PROMPT_ACORTAR_TITULO.format(n=n, titulo=actual))
+            nuevo = (getattr(resp, "content", "") or "").strip().strip('"«»“”').split("\n")[0].strip()
+        except Exception as exc:                               # noqa: BLE001
+            logger.warning(f"[Redactor] No se pudo acortar el título: {exc}")
+            break
+        if nuevo and _palabras_titulo(nuevo) < n:
+            actual = nuevo
+    return etiqueta + actual
+
+
+def _acortar_titulo_nucleo(llm, texto: str) -> str:
+    """Aplica `_acortar_titulo` a la primera línea del bloque «### Título…»."""
+    bloques = re.split(r"(?m)^(?=###\s)", texto or "")
+    for i, bloque in enumerate(bloques):
+        cabecera, _, cuerpo = bloque.partition("\n")
+        if cabecera.startswith("###") and "titulo" in _clave_subpunto(cabecera.lstrip("#")):
+            lineas = cuerpo.split("\n")
+            j = next((k for k, l in enumerate(lineas) if l.strip()), None)
+            if j is not None and _palabras_titulo(lineas[j]) > 20:
+                lineas[j] = _acortar_titulo(llm, lineas[j])
+                bloques[i] = cabecera + "\n" + "\n".join(lineas)
+            break
+    return "".join(bloques)
+
+
+def _palabras_titulo_nucleo(texto: str) -> int:
+    """Palabras del título dentro del texto del núcleo (0 si no hay bloque de título)."""
+    for bloque in re.split(r"(?m)^(?=###\s)", texto or ""):
+        cabecera, _, cuerpo = bloque.partition("\n")
+        if cabecera.startswith("###") and "titulo" in _clave_subpunto(cabecera.lstrip("#")):
+            primera = next((l for l in cuerpo.split("\n") if l.strip()), "")
+            return _palabras_titulo(primera)
+    return 0
+
+
+_RE_PERIODO = re.compile(r"\b(?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\b")
+
+
+def _anios_del_proyecto_en_titulo(texto: str, contexto: str) -> str:
+    """El periodo del título propuesto tiene que salir del proyecto.
+
+    El redactor agregaba años para «delimitar el tiempo» que el estudiante nunca
+    escribió («… durante 2024», «(2024–2026)»). Un año que no aparece en su texto
+    se sustituye por un marcador para que lo complete él."""
+    anios_ok = set(re.findall(r"\b(?:19|20)\d{2}\b", contexto or ""))
+    bloques = re.split(r"(?m)^(?=###\s)", texto or "")
+    for i, bloque in enumerate(bloques):
+        cabecera, sep, cuerpo = bloque.partition("\n")
+        if not (cabecera.startswith("###") and "titulo" in _clave_subpunto(cabecera.lstrip("#"))):
+            continue
+        lineas = cuerpo.split("\n")
+        j = next((k for k, l in enumerate(lineas) if l.strip()), None)
+        if j is None:
+            break
+
+        def _periodo(m: re.Match) -> str:
+            if all(a in anios_ok for a in re.findall(r"(?:19|20)\d{2}", m.group(0))):
+                return m.group(0)
+            logger.warning(f"[Redactor/Núcleo] Año del título ajeno al proyecto: «{m.group(0)}»")
+            return "[periodo por definir]"
+
+        lineas[j] = _RE_PERIODO.sub(_periodo, lineas[j])
+        bloques[i] = cabecera + sep + "\n".join(lineas)
+        break
+    return "".join(bloques)
+
+
+def _clave_subpunto(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+    s = re.sub(r"^\s*[\divxlc]+(\.[\d]+)*[.)]?\s+", "", s)   # quita la numeración
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+_AUTOR = r"[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:-[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?"
+_AUTORES = rf"{_AUTOR}(?:\s+et\s+al\.?|\s+y\s+{_AUTOR})?"
+_RE_CITA_PARENTESIS = re.compile(rf"\s*\(\s*({_AUTORES}),?\s*(\d{{4}})\s*\)")
+_RE_CITA_NARRATIVA = re.compile(
+    rf"(?:,?\s*(?:según|de acuerdo con|siguiendo a|como (?:señalan?|indican?|plantean?))\s+)?"
+    rf"({_AUTORES})\s*\((\d{{4}})\)")
+
+
+def _sin_citas_ajenas(texto: str, contexto: str) -> str:
+    """Quita las citas autor-año cuyo autor no aparece en el proyecto del estudiante.
+
+    En las justificaciones («✓ Ya cumple … según Hernández et al. (2017)») el modelo
+    citaba de memoria autores que ni el estudiante ni la biblioteca aportaban, y con
+    el año equivocado. Una cita que el estudiante no puede verificar no se muestra."""
+    if not texto:
+        return texto
+    base = unicodedata.normalize("NFKD", contexto or "").encode("ascii", "ignore").decode().lower()
+
+    def _conocido(autores: str) -> bool:
+        apellido = re.split(r"[\s-]", autores.strip())[0]
+        plano = unicodedata.normalize("NFKD", apellido).encode("ascii", "ignore").decode().lower()
+        return len(plano) < 3 or plano in base
+
+    def _quitar(m: re.Match) -> str:
+        if _conocido(m.group(1)):
+            return m.group(0)
+        logger.warning(f"[Redactor/Núcleo] Cita ajena al proyecto retirada: «{m.group(0).strip()}»")
+        return ""
+
+    texto = _RE_CITA_PARENTESIS.sub(_quitar, texto)
+    texto = _RE_CITA_NARRATIVA.sub(_quitar, texto)
+    return re.sub(r"[ \t]+([.,;:])", r"\1", texto)
+
+
+def _solo_bloques_del_plan(texto: str, plan: dict | None) -> str:
+    """Descarta los bloques «### …» que no son subpuntos del plan.
+
+    El prompt ya lo prohíbe, pero el modelo añadía bloques propios —«3. Tipo de
+    investigación», «4. Línea de investigación» con una sublínea inventada— que
+    el estudiante recibía como «texto mejorado» de su proyecto.
+    """
+    plan = plan or {}
+    permitidos = [
+        _clave_subpunto(s) for s in (plan.get("reescribir") or [])
+    ] + [
+        _clave_subpunto(o.get("seccion", "")) for o in (plan.get("observar") or [])
+    ]
+    permitidos = [p for p in permitidos if p]
+    if not permitidos or not texto or "### " not in texto:
+        return texto
+
+    bloques = re.split(r"(?m)^(?=###\s)", texto)
+    conservados = []
+    for b in bloques:
+        if not b.startswith("###"):
+            if b.strip():
+                conservados.append(b)
+            continue
+        cabecera = _clave_subpunto(b.split("\n", 1)[0].lstrip("#").strip())
+        if any(cabecera == p or cabecera in p or p in cabecera for p in permitidos):
+            if "titulo" in cabecera:
+                cabeza, _, cuerpo = b.partition("\n")
+                b = cabeza + "\n" + _recortar_titulo(cuerpo) + "\n\n"
+            conservados.append(b)
+        else:
+            logger.warning(f"[Redactor/Núcleo] Bloque fuera del plan descartado: «{cabecera}»")
+    return "".join(conservados).strip() or texto
+
+
 def _subpuntos_omitidos(plan: dict | None, texto: str) -> list[str]:
     """Subpuntos que el plan mandaba reescribir y no aparecen en el texto entregado.
 
@@ -601,7 +836,13 @@ def _instruccion_nucleo(plan: dict | None) -> str:
         "ENCABEZADOS OBLIGATORIOS: usa EXACTAMENTE los nombres de las listas A y B, copiados tal cual "
         "y precedidos de `### `. No inventes otros encabezados, no cambies su numeración, no añadas "
         "subpuntos que no estén en las listas y no omitas ninguno. Cada bloque contiene SOLO su propio "
-        "contenido.\n\n"
+        "contenido. El bloque del TÍTULO contiene ÚNICAMENTE el título (una línea, máximo 20 palabras "
+        "contando conectores y fechas): nada de línea, sublínea, tipo de investigación ni datos de la "
+        "carátula, y no inventes un tema que no esté en el proyecto. Si le agregas espacio o tiempo, "
+        "usa SOLO un lugar, institución o periodo que aparezca en el proyecto (problema, objetivos, "
+        "portada); si no declara ninguno, no lo inventes («contexto nacional», «en el Perú»…): "
+        "pon [lugar por definir] y dilo en los cambios. Escríbelo solo con mayúscula inicial y en los "
+        "nombres propios y siglas (no Mayúsculas En Cada Palabra).\n\n"
         "A) MEJÓRALOS DE VERDAD (su nota NO es la máxima). Entrega el texto del subpunto YA MEJORADO, "
         "listo para entregar, APLICANDO los cambios (no solo describiéndolos). Cada cambio tiene que "
         "cerrar una de las brechas indicadas abajo: si un retoque no cierra ninguna, NO lo hagas — "
@@ -623,22 +864,52 @@ def _instruccion_nucleo(plan: dict | None) -> str:
     )
 
 
+# Observaciones de un ítem «no aplicable» cuyo motivo es que esa parte NO ESTÁ en el
+# texto revisado (otra sección, aún sin redactar), no el tipo de investigación. Al
+# revisar solo los objetivos, salían siete ítems del marco teórico, la metodología o
+# las referencias rotulados «por tu tipo/diseño no es exigible», que es falso.
+_RE_NA_POR_AUSENCIA = re.compile(
+    r"no\s+(est[aá]n?|se\s+encuentra\w*|aparece\w*|figura\w*)\s+(presentes?|declarad\w*|incluid\w*|"
+    r"entregad\w*|desarrollad\w*|redactad\w*|evaluable\w*|en\s+el\s+(texto|contexto|documento))|"
+    r"no\s+(ha|han)\s+sido\s+(declarad|entregad|incluid|redactad|desarrollad)\w*|"
+    r"no\s+se\s+(incluye\w*|declara\w*|presenta\w*|proporciona\w*|entreg\w*)|"
+    r"no\s+puede\s+evaluarse|no\s+es\s+evaluable|fuera\s+del\s+(texto|alcance)|"
+    r"(proyecto|secci[oó]n)\s+(est[aá]\s+)?en\s+(curso|desarrollo)|sin\s+(entregar|redactar)",
+    re.I,
+)
+
+
 def _notas_na_tipo(state: MentoriaState) -> str:
     """Mensaje DUAL para ítems que el tipo no exige pero la rúbrica sí califica:
-    no son errores (por el tipo), pero el jurado los evalúa → tenerlos en cuenta."""
+    no son errores (por el tipo), pero el jurado los evalúa → tenerlos en cuenta.
+
+    Los ítems que quedaron fuera porque su sección no está en el texto revisado
+    no se rotulan como exención por tipo: se nombran en una sola línea aparte."""
     na = state.get("items_na_tipo") or []
     if not na:
         return ""
-    lineas = [
-        "**Criterios que tu rúbrica exige pero tu tipo de investigación no requiere** "
-        "(no son errores; el sistema no los penalizó, pero el jurado los califica con esta rúbrica):"
-    ]
-    for it in na:
-        n   = it.get("item_numero", "?")
-        obs = (it.get("observacion") or "").strip()
+    por_tipo = [it for it in na if not _RE_NA_POR_AUSENCIA.search(it.get("observacion") or "")]
+    ausentes = [it.get("item_numero", "?") for it in na if it not in por_tipo]
+
+    lineas: list[str] = []
+    if por_tipo:
         lineas.append(
-            f"- Ítem {n}: por tu tipo/diseño de investigación no es exigible (no penaliza). "
-            f"Aun así tu rúbrica lo evalúa; considéralo o justifica su ausencia ante el jurado. {obs}"
+            "**Criterios que tu rúbrica exige pero tu tipo de investigación no requiere** "
+            "(no son errores; el sistema no los penalizó, pero el jurado los califica con esta rúbrica):"
+        )
+        for it in por_tipo:
+            n   = it.get("item_numero", "?")
+            obs = (it.get("observacion") or "").strip()
+            lineas.append(
+                f"- Ítem {n}: por tu tipo/diseño de investigación no es exigible (no penaliza). "
+                f"Aun así tu rúbrica lo evalúa; considéralo o justifica su ausencia ante el jurado. {obs}"
+            )
+    if ausentes:
+        if lineas:
+            lineas.append("")
+        lineas.append(
+            f"_No califiqué los ítems {', '.join(str(n) for n in ausentes)} de la rúbrica: corresponden "
+            "a secciones que no están en el texto revisado. Se evaluarán cuando las incluyas._"
         )
     return "\n".join(lineas)
 

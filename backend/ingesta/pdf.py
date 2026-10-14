@@ -157,6 +157,26 @@ def _leer_outline(datos: bytes) -> dict[str, int]:
 
 # ── Entrada pública ──────────────────────────────────────────────────────────
 
+def _con_imagenes(datos: bytes, paginas: list[int]) -> list[int]:
+    """De las páginas dadas (numeradas desde 1), las que contienen alguna imagen."""
+    if not paginas:
+        return []
+    try:
+        import pypdfium2 as pdfium
+        import pypdfium2.raw as pdfium_c
+
+        pdf = pdfium.PdfDocument(datos)
+        con_imagen = []
+        for n in paginas:
+            if 1 <= n <= len(pdf) and any(
+                o.type == pdfium_c.FPDF_PAGEOBJ_IMAGE for o in pdf[n - 1].get_objects()
+            ):
+                con_imagen.append(n)
+        return con_imagen
+    except Exception:                                          # noqa: BLE001
+        return paginas        # ante la duda se avisa, como antes
+
+
 def _esta_cifrado(datos: bytes) -> bool:
     try:
         import pypdfium2 as pdfium
@@ -218,6 +238,11 @@ def extraer_pdf(datos: bytes) -> ResultadoPdf:
     ]
 
     sin_texto = [n for n in sorted(mejor) if not es_utilizable(mejor[n])]
+    # Solo se avisa de las páginas que tienen IMÁGENES: esas sí pueden esconder
+    # contenido (capturas, escaneos). Una página casi vacía sin imágenes —la hoja
+    # de Anexos, la continuación en blanco de la matriz— no pierde nada, y el
+    # aviso le salía a 19 de 20 estudiantes sin motivo.
+    sin_texto = _con_imagenes(datos, sin_texto)
     if sin_texto:
         muestra = ", ".join(str(n) for n in sin_texto[:8])
         sufijo = "…" if len(sin_texto) > 8 else ""

@@ -10,7 +10,10 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-_lock = threading.Lock()
+# Reentrante: get_biblioteca() pide get_embeddings() con el lock ya tomado. Con un
+# Lock simple eso se bloqueaba para siempre si los embeddings aún no estaban
+# cargados (p. ej. si el precalentamiento del arranque falló).
+_lock = threading.RLock()
 _embeddings = None
 _graph = None
 _biblioteca = None

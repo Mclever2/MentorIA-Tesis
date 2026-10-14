@@ -7,6 +7,8 @@ import logging
 
 from langchain_openai import ChatOpenAI
 
+from backend.config import modelo_llm
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,7 +18,7 @@ def llm_rapido(temperatura: float = 0.0) -> ChatOpenAI:
         raise ValueError("No se encontró 'OPENAI_API_KEY' en el entorno.")
     return ChatOpenAI(
         api_key=api_key,
-        model="gpt-4o-mini",
+        model=modelo_llm(),
         temperature=temperatura,
         max_retries=2,
         timeout=60.0,

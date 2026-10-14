@@ -143,7 +143,8 @@ una de estas tres salidas —que sí funcionan y son aceptadas—:
 
 class Problema(BaseModel):
     realidad: str = Field(
-        description="La realidad problemática, 2-3 párrafos: qué ocurre, a quién afecta, con qué "
+        description="La realidad problemática, 3-4 párrafos en embudo (internacional → nacional → "
+                    "local, hasta el ámbito real del estudio): qué ocurre, a quién afecta, con qué "
                     "magnitud y qué consecuencia tiene. Los datos que no tengas van como hueco "
                     "explícito [dato por conseguir: … — fuente: …]. Redactado en segunda persona "
                     "para que el estudiante lo pueda usar como base."
@@ -267,7 +268,11 @@ CÓMO TRABAJAS — con criterio, no por rellenar:
 - La realidad problemática NO es una opinión general sobre el tema: es la descripción de algo que
   ocurre, a quién le ocurre, cuánto y con qué consecuencia. Si no puedes cuantificar, di qué dato
   haría falta y dónde se consigue.
-- Ordena: (1) contexto y qué se hace hoy, (2) qué falla y a quién afecta, (3) magnitud o síntoma
+- El contexto va con la TÉCNICA DEL EMBUDO: parte de la situación internacional (mundial o regional,
+  p. ej. América Latina), baja a la nacional y luego a la local o institucional, con un dato y su
+  fuente (o su hueco) en cada nivel. El embudo termina en el ámbito REAL del estudio: si el estudio es
+  nacional, termina en lo nacional; no inventes un nivel local que el proyecto no tiene.
+- Luego: (1) qué se hace hoy en ese ámbito, (2) qué falla y a quién afecta, (3) magnitud o síntoma
   medible, (4) consecuencia si sigue así, (5) qué vacío deja lo que ya existe.
 - Que cada afirmación fuerte sea verificable o esté marcada como hueco. Prefiere tres frases
   sostenibles a dos párrafos que suenan bien y no se pueden defender."""
@@ -530,6 +535,15 @@ def responder_planteamiento(mensaje: str, historial: list[dict], doc, biblioteca
 
     contexto = _interes_del_hilo(mensaje, historial)
     titulo = _titulo_del_hilo(mensaje, historial, doc)
+    # Si ya redactó parte de la cadena, se parte de ella: antes el panel la
+    # reemplazaba por una nueva construida solo desde el título.
+    ya_escrito = _cadena_redactada(doc)
+    if ya_escrito:
+        contexto = (
+            (contexto or "") + "\n\nLO QUE YA TIENE REDACTADO EN SU DOCUMENTO (parte de esto: "
+            "consérvalo, señala qué falla y mejóralo; no lo sustituyas por otro enfoque):\n"
+            + ya_escrito
+        ).strip()
     programa = (getattr(doc, "programa", "") or "") if doc is not None else ""
 
     # Sin título ni descripción del proyecto NO se redacta nada. Pedir «dame mis
@@ -886,29 +900,54 @@ def _evidencia(tema: str, programa: str) -> tuple[str, int]:
         return "", 0
 
 
+_RE_SECCION_CADENA = re.compile(
+    r"^\s*1\.(1|2)\b|problema|formulaci[oó]n|objetivo|pregunta", re.I
+)
+
+
+def _cadena_redactada(doc, max_chars: int = 4000, patron: re.Pattern | None = None) -> str:
+    """Secciones que el estudiante ya escribió y que casan con `patron` (por defecto
+    problema, formulación y objetivos), con su texto (o "" si no hay)."""
+    if doc is None or getattr(doc, "vector_store", None) is None:
+        return ""
+    patron = patron or _RE_SECCION_CADENA
+    partes: list[str] = []
+    for st in doc.stats or []:
+        nombre = st.get("seccion") or ""
+        if st.get("chars", 0) < 80 or not patron.search(nombre):
+            continue
+        try:
+            res = doc.vector_store._collection.get(where={"seccion": nombre}, include=["documents"])
+        except Exception:                                      # noqa: BLE001
+            continue
+        texto = "\n".join(t for t in (res.get("documents") or []) if t).strip()
+        if texto:
+            partes.append(f"[{nombre}]\n{texto[:1500]}")
+    return "\n\n".join(partes)[:max_chars]
+
+
 def _titulo_del_hilo(mensaje: str, historial: list[dict] | None, doc) -> str:
     """Busca el título: el del proyecto indexado, o el que el estudiante pegó en el chat."""
-    if doc is not None and getattr(doc, "vector_store", None) is not None:
-        try:
-            from backend.rag import limpiar_marcas_rag, recuperar_contexto
-
-            texto = limpiar_marcas_rag(recuperar_contexto(doc.vector_store, "1. Título del proyecto"))
-            primera = next((l.strip() for l in (texto or "").split("\n") if len(l.strip()) > 30), "")
-            if primera:
-                return primera[:300]
-        except Exception:                                      # noqa: BLE001
-            pass
+    # El título se detecta al indexar (sección «1. Título» o carátula). Antes se
+    # tomaba «la primera línea larga» del contexto de la sección 1, que en un PDF
+    # con índice era «1.1. Descripción y delimitación del problema 6»: con eso el
+    # panel buscaba tesis parecidas y armaba un proyecto ajeno (transporte de
+    # carga, gestión de proyectos…). Si el documento no trae título, no se adivina.
+    titulo_doc = (getattr(doc, "titulo_proyecto", "") or "").strip() if doc is not None else ""
+    if titulo_doc:
+        return titulo_doc[:300]
 
     # Sin proyecto: el título suele venir pegado en el propio mensaje o en uno previo.
-    from .llm import llm_rapido as _llm
+    # Antes valía «cualquier línea larga sin signos de pregunta», y «LA BASE TEÓRICA,
+    # CÓMO LA REDACTO, QUÉ CONSIDERACIONES DEBO TENER» pasaba por título: los paneles
+    # trabajaban sobre la pregunta del estudiante como si fuera su tema.
+    from .intent import titulo_en_texto
 
     candidatos = [mensaje] + [
         t.get("contenido", "") for t in reversed(historial or []) if t.get("rol") == "user"
     ]
     for c in candidatos:
-        for linea in (c or "").split("\n"):
-            limpio = linea.strip(" .\"'«»")
-            # Un título de tesis es una línea larga sin signos de pregunta.
-            if 40 < len(limpio) < 300 and "?" not in limpio and "¿" not in limpio:
-                return limpio
+        titulo = titulo_en_texto(c)
+        if titulo:
+            return titulo
     return ""

@@ -136,6 +136,16 @@ def _validar_decision_semantica(siguiente: str, state: MentoriaState) -> str | N
     if siguiente in ("consenso", "disenso") and n_errores == 0:
         return f"{siguiente} innecesario sin errores (panel sin hallazgos)"
 
+    # Repetir un nodo que ya corrió en esta iteración no aporta nada y, con algunos
+    # modelos (gpt-4.1-mini), el supervisor elegía «consenso» una y otra vez hasta
+    # agotar los pasos: la sección terminaba sin pasar nunca por el redactor.
+    ya_ejecutado = {
+        "auditor": auditor_ok, "metodologico": metodologico_ok,
+        "consenso": consenso_ok, "disenso": disenso_ok,
+    }
+    if ya_ejecutado.get(siguiente):
+        return f"{siguiente} ya se ejecutó en esta iteración"
+
     if siguiente == "consenso" and (not auditor_ok or not metodologico_ok):
         return "consenso sin auditor y metodólogo completos"
 

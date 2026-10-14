@@ -100,8 +100,10 @@ comité de ética y consentimiento informado; con animales o biodiversidad, sus 
 resguarda sus datos (instrumentos, procedimiento, análisis).
 - Redacción publicable: la tesis termina en el Repositorio Institucional de acceso abierto \
 (Art. 54), por lo que la claridad y el rigor formal cuentan.
-- Referencias bibliográficas en APA 7.ª edición como norma preferente del programa, salvo \
-que el texto declare otra norma internacional admitida."""
+- Citas y referencias en APA 7.ª edición: es la norma del programa de Ingeniería de Computación y \
+Sistemas. La rúbrica menciona las normas internacionales en general, pero al recomendar pide \
+SIEMPRE APA 7 y no sugieras otras; si el proyecto usa otra norma (p. ej. ISO 690), señálalo y \
+recomienda pasarlo a APA 7."""
 
 
 def perfil_institucional_upao() -> str:

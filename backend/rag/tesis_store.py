@@ -389,6 +389,18 @@ def recuperar_contexto(
             )
             return "\n\n" + "\n\n---\n\n".join(fragmentos) + "\n"
 
+    # La PORTADA (I. Generalidades) reusa la numeración del plan: «3.1. De acuerdo con
+    # la orientación…» comparte prefijo con «3.1. Supuestos básicos». Ordenados por
+    # posición, sus fragmentos entraban primero y el redactor justificaba los supuestos
+    # con la clasificación del tipo de investigación. Si se pide una sección del plan,
+    # la portada no entra.
+    from backend.config import _clave_portada_upao
+    if not _clave_portada_upao(seccion):
+        sin_portada = [d for d in todos_docs
+                       if not _clave_portada_upao(d.metadata.get("seccion", "") or "")]
+        if sin_portada:
+            todos_docs = sin_portada
+
     top_meta = [d.metadata.get("seccion") for d in todos_docs[:K_INICIAL]
                 if d.metadata.get("seccion")]
 

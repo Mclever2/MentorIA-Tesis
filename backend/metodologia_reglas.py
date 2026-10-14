@@ -14,6 +14,7 @@ para el Proyecto de Tesis», uno de los libros indexados, más lo observado en l
 from __future__ import annotations
 
 import math
+import re
 
 # Columnas canónicas de la tabla de operacionalización (Tabla 9 del libro).
 COLUMNAS_OPERACIONALIZACION = [
@@ -224,3 +225,110 @@ def verificar_matriz(
                 "en un estudio que las exige, cada objetivo específico debe tener la suya."
             )
     return hallazgos
+
+
+# ── Diseño según lo que se compara (fuente única) ────────────────────────────
+#
+# Lo usan el panel de metodología y el conversador. Antes cada uno razonaba por
+# su cuenta: el panel proponía un cuasiexperimento con grupo control para
+# comparar un modelo contra una línea base, y el conversador recomendaba pruebas
+# para «dos grupos independientes» cuando las dos condiciones se evalúan sobre
+# las MISMAS instancias.
+CRITERIOS_DISENO_INGENIERIA = """\
+   · Si lo que se mide es el DESEMPEÑO DE UN MODELO, ALGORITMO O SISTEMA sobre datos (detección,
+     clasificación, predicción, exactitud de una transformación, tiempo de cómputo…) y se compara con
+     una LÍNEA BASE (el método actual, un método sin IA, otro modelo), NO hay grupo experimental ni
+     grupo control de personas: es un EXPERIMENTO COMPUTACIONAL CONTROLADO. Las mismas instancias de
+     prueba se procesan con la propuesta y con la línea base (comparación PAREADA). Como se aplica
+     deliberadamente cada método (la VI) y se compara, es un diseño EXPERIMENTAL; llamarlo «no
+     experimental» solo se sostiene si no hay comparación y únicamente se describe el desempeño. Si el
+     estudiante lo declaró «no experimental» y sí compara, señálalo como incoherencia y ofrécele los
+     dos caminos (reclasificarlo o quitar la comparación). La unidad de análisis es la instancia
+     (registro, flujo de red, imagen, esquema, consulta…); la población es el conjunto de datos del que
+     salen, y la «muestra» es la partición de prueba o los k pliegues de validación cruzada,
+     justificados — la fórmula de población finita NO aplica salvo que se muestreen registros de una
+     base real para etiquetarlos. Métricas: las del problema (exactitud, precisión, recall, F1, AUC,
+     error, latencia…). Contraste, siempre PAREADO: McNemar si ambos clasifican las mismas instancias;
+     t de Student pareada (datos normales) o Wilcoxon de rangos con signo sobre los k pliegues o las
+     repeticiones; NUNCA t independiente ni U de Mann-Whitney, que son para grupos distintos. Reporta
+     también el tamaño del efecto. Recomienda fijar semillas, separar entrenamiento/validación/prueba
+     sin fuga de datos y usar un conjunto de prueba que represente el contexto del título.
+   · Si lo que se mide es el EFECTO EN PERSONAS, PROCESOS U ORGANIZACIONES (tiempos de atención,
+     satisfacción, errores o tiempos de un proceso, documentos o registros gestionados) ANTES Y DESPUÉS
+     de implantar el sistema, lo habitual en Ingeniería es PREEXPERIMENTAL con preprueba y posprueba en
+     un solo grupo (G: O1 X O2), porque rara vez existe un grupo control comparable; su contraste es t
+     pareada o Wilcoxon. Medir las mismas unidades antes y después SIN grupo control es preexperimental,
+     no «experimental»: no lo llames así. Cuasiexperimental SOLO si de verdad existe ese
+     segundo grupo (otra sede, otro turno) y se puede decir en qué se parecen; no lo propongas por
+     defecto. Si hay personas, recuerda el consentimiento informado y el comité de ética (Art. 71.a).
+   · Si el aporte es CONSTRUIR un artefacto y validarlo, sin hipótesis de mejora estadística, es
+     investigación tecnológica (p. ej. Design Science Research): el diseño son sus fases de
+     construcción y la validación se hace con pruebas del artefacto y, si aplica, juicio de expertos.
+   Si no está claro cuál de los tres es, PREGÚNTALO en vez de suponer.
+   · Al EXPLICAR los diseños (aunque el libro los describa con otras palabras): el cuasiexperimental
+     compara SIEMPRE al menos dos grupos —experimental y control— ya formados, sin asignación al azar
+     (p. ej. dos sedes o dos turnos); un solo grupo medido antes y después de la intervención es
+     PREEXPERIMENTAL (O1 X O2), nunca cuasiexperimental. No uses «antes y después en un solo grupo»
+     como ejemplo de cuasiexperimento."""
+
+
+# Señales para decidir, SIN LLM, qué se compara en el proyecto. El modelo aplicaba
+# la regla de diseño de forma inconsistente (a la misma pregunta respondía
+# «preexperimental» o «experimento computacional»); con esta clasificación previa
+# recibe la decisión ya tomada y solo la contradice si el texto lo justifica.
+_SENAL_COMPUTACIONAL = re.compile(
+    r"\b(f1(-score)?|precisi[oó]n|recall|sensibilidad|accuracy|exactitud|auc|"
+    r"matriz\s+de\s+confusi[oó]n|dataset|conjuntos?\s+de\s+datos|datos\s+de\s+prueba|"
+    r"validaci[oó]n\s+cruzada|tr[aá]fico\s+de\s+red|deep\s+learning|aprendizaje\s+(profundo|autom[aá]tico)|"
+    r"machine\s+learning|redes?\s+neuronal\w*|modelos?\s+de\s+lenguaje|llm|algoritmos?|"
+    r"clasificaci[oó]n|detecci[oó]n|latencia|l[ií]nea\s+base|baseline|coincidencia\s+exacta|"
+    r"entrenad[oa]s?|generalizaci[oó]n|p[eé]rdida\s+de\s+desempe[nñ]o|alucinaci[oó]n(es)?|"
+    r"tasa\s+de\s+error)\b",
+    re.I,
+)
+_SENAL_PERSONAS = re.compile(
+    r"\b(satisfacci[oó]n|encuestas?|cuestionarios?|pacientes?|clientes?|trabajadores?|"
+    r"colaboradores?|tiempos?\s+de\s+(espera|atenci[oó]n)|atenci[oó]n\s+al|percepci[oó]n|"
+    r"usabilidad|consentimiento)\b",
+    re.I,
+)
+
+
+_SENAL_METRICA = re.compile(
+    r"\b(f1(-score)?|precisi[oó]n|recall|sensibilidad|accuracy|exactitud|auc|latencia|"
+    r"tasa\s+de\s+(error|acierto|detecci[oó]n|falsos)|p[eé]rdida\s+de\s+desempe[nñ]o)\b",
+    re.I,
+)
+
+
+def perfil_comparacion(texto: str) -> str:
+    """'computacional', 'personas' o 'indeterminado' según lo que mide el proyecto."""
+    texto = re.sub(r"\s+", " ", texto or "")
+    comp = {m.group(0).lower() for m in _SENAL_COMPUTACIONAL.finditer(texto)}
+    pers = {m.group(0).lower() for m in _SENAL_PERSONAS.finditer(texto)}
+    # Sin una MÉTRICA de desempeño no hay comparación computacional que sostener:
+    # mencionar «deep learning» o «detección» no basta (G14 automatiza procesos).
+    if len(comp) >= 3 and _SENAL_METRICA.search(texto) and len(comp) >= 2 * len(pers):
+        return "computacional"
+    if len(pers) >= 2 and len(pers) > len(comp):
+        return "personas"
+    return "indeterminado"
+
+
+PERFIL_COMPARACION_TEXTO = {
+    "computacional": (
+        "CLASIFICACIÓN PREVIA (determinista): en este proyecto lo que se compara es el DESEMPEÑO DE UN "
+        "MODELO O SISTEMA sobre datos → EXPERIMENTO COMPUTACIONAL CONTROLADO con comparación pareada "
+        "frente a la línea base. No propongas preexperimental ni G.E./G.C. de personas salvo que el texto "
+        "muestre claramente que se mide a personas."
+    ),
+    "personas": (
+        "CLASIFICACIÓN PREVIA (determinista): en este proyecto se mide el EFECTO EN PERSONAS U "
+        "ORGANIZACIONES → PREEXPERIMENTAL con preprueba y posprueba (G: O1 X O2), salvo que exista un "
+        "grupo control real y comparable."
+    ),
+    "indeterminado": (
+        "CLASIFICACIÓN PREVIA: no está claro si se compara un modelo/sistema sobre datos o el efecto en "
+        "personas. Si no puedes decidirlo con lo escrito, PREGÚNTALO antes de fijar el diseño."
+    ),
+}

@@ -20,6 +20,7 @@ import os
 import json
 import uuid
 import hashlib
+import re
 import logging
 from contextlib import asynccontextmanager
 
@@ -204,6 +205,8 @@ async def subir_documento(
         universidad="UPAO",
         programa="ingeniería de sistemas",
         perfil_institucional=perfil_institucional_upao(),
+        titulo_proyecto=estructura.titulo,
+        secciones_plantilla=list(estructura.sin_redactar),
     )
     doc.alcance = alcance_sugerido(doc)
 
@@ -229,6 +232,8 @@ def _documento_a_json(doc, ya_indexado: bool = False) -> dict:
         "origen_estructura": doc.origen_estructura,
         "avisos":            doc.avisos,
         "alcance":           doc.alcance,
+        "titulo":            doc.titulo_proyecto,
+        "sin_redactar":      doc.secciones_plantilla,
     }
 
 
@@ -401,14 +406,18 @@ def reglamento_oficial(_user: dict = Depends(usuario_actual)):
     return {**REGLAMENTO_UPAO, "perfil_agentes": PERFIL_AGENTES_UPAO}
 
 
+DOC_NO_DISPONIBLE = (
+    "Documento no disponible en el servidor (puede haberse reiniciado). "
+    "Vuelve a subir tu PDF para continuar."
+)
+
+
 def _obtener_doc_o_404(doc_id: str, user: dict):
+    # 409 y no 404: el frontend lo reconoce como «proyecto perdido por reinicio» y
+    # lo re-indexa solo desde lo que guardó en Supabase.
     doc = registry.obtener_documento(doc_id)
     if doc is None or doc.user_id != user.get("sub", "anon"):
-        raise HTTPException(
-            status_code=404,
-            detail="Documento no disponible en el servidor (puede haberse reiniciado). "
-                   "Vuelve a subir tu PDF para continuar.",
-        )
+        raise HTTPException(status_code=409, detail=DOC_NO_DISPONIBLE)
     return doc
 
 
@@ -446,7 +455,7 @@ def heartbeat(req: HeartbeatRequest, user: dict = Depends(usuario_actual)):
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
-    from .intent import interpretar_mensaje
+    from .intent import interpretar_mensaje, secciones_mencionadas
     from . import mejoras, analytics
 
     user_id = user.get("sub", "anon")
@@ -454,6 +463,12 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
     doc = registry.obtener_documento(req.doc_id) if req.doc_id else None
     if doc is not None and doc.user_id != user.get("sub", "anon"):
         doc = None
+    # El frontend cree tener un proyecto vivo que el servidor ya no tiene (la instancia
+    # de Cloud Run se recicló y el registro vive en memoria). Antes se seguía como si
+    # no hubiera proyecto y el mentor respondía «aún no has subido tu tesis»; con el
+    # 409 el frontend lo re-indexa desde Supabase y reenvía el mensaje.
+    if req.doc_id and doc is None:
+        raise HTTPException(status_code=409, detail=DOC_NO_DISPONIBLE)
 
     toc_nombres = sorted(
         (doc.estructura_toc or {}).items(), key=lambda x: x[1]
@@ -471,15 +486,103 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
         vector_store=doc.vector_store if doc else None,
     )
 
+    # Pedir evaluar/mejorar una sección que solo tiene el texto de ejemplo del
+    # formato: no hay nada del estudiante que calificar. Antes la red le ponía nota
+    # al párrafo de relleno («metodológicamente inconsistente», 2/6) y proponía un
+    # texto con «[INSERTAR HIPÓTESIS AQUÍ]».
+    # Evaluar o mejorar un título que el estudiante aún no ha escrito: el redactor se
+    # inventaba uno entero (con su tema) a partir de la carátula vacía.
+    if (doc is not None and intencion["modo"] in ("secciones", "mejora", "titulo")
+            and not (doc.titulo_proyecto or "").strip()
+            and re.search(r"\bt[ií]tulo", req.mensaje, re.I)
+            and not re.search(r"\b(prop[oó]n|dame|sug[ie]|ideas?|opciones|ay[uú]dame\s+a\s+(crear|elegir|definir))",
+                              req.mensaje, re.I)):
+        return {
+            "tipo": "conversacion",
+            "respuesta": (
+                "Todavía no has escrito el título de tu proyecto: en la carátula sigue el texto del "
+                "formato («Título del proyecto de tesis (Solo con mayúscula la primera letra…)»), así "
+                "que no hay un título tuyo que evaluar o mejorar.\n\n"
+                "Si quieres, dime de qué trata tu investigación —qué vas a construir o aplicar, qué "
+                "quieres mejorar o medir, dónde y en qué periodo— y te ayudo a proponer opciones."
+            ),
+        }
+
+    if doc is not None and intencion["modo"] in ("secciones", "completo", "mejora"):
+        plantilla = [v for v in doc.secciones_plantilla if not re.match(r"^\s*1\.?\s*T[ií]tulo", v)]
+        con_texto = {st.get("seccion") for st in (doc.stats or []) if st.get("chars", 0) >= 80}
+        vacias = secciones_mencionadas(req.mensaje, plantilla, estricto=True)
+        con_texto_pedidas = []
+        for nombre in secciones_mencionadas(req.mensaje, toc_nombres, estricto=True):
+            if nombre in con_texto:
+                con_texto_pedidas.append(nombre)
+                continue
+            # Encabezado de capítulo sin texto propio («4. MARCO METODOLÓGICO»): lo
+            # que cuenta es si alguno de sus apartados está redactado.
+            m = re.match(r"^\s*(\d+)\.?\s", nombre)
+            if not m:
+                continue
+            hijo = re.compile(rf"^\s*{m.group(1)}\.\d")
+            if any(hijo.match(c) for c in con_texto):
+                con_texto_pedidas.append(nombre)
+            else:
+                vacias += [v for v in plantilla if hijo.match(v) and v not in vacias]
+        if vacias and not con_texto_pedidas:
+            lista = ", ".join(f"**{v}**" for v in vacias)
+            if intencion["modo"] == "mejora":
+                # «Redacta mi importancia del estudio» sobre una sección vacía: no hay
+                # texto que mejorar, pero sí se le puede orientar para escribirla.
+                from .conversador import responder_consulta
+                from .deps import get_biblioteca
+
+                guia = responder_consulta(
+                    mensaje=(
+                        f"{req.mensaje}\n\n[Nota del sistema: {', '.join(vacias)} aún no está "
+                        "redactada en su documento (solo tiene el texto de ejemplo del formato). "
+                        "Explícale qué debe contener, con preguntas guía y un esquema basado en "
+                        "SU título y lo que ya escribió, para que la redacte él. No la redactes "
+                        "completa ni inventes datos, fuentes ni cifras.]"
+                    ),
+                    historial=historial, doc=doc, biblioteca=get_biblioteca(),
+                )
+                return {
+                    "tipo": "conversacion",
+                    "respuesta": (
+                        f"{lista} todavía tiene solo el texto de ejemplo del formato en tu "
+                        f"documento, así que no hay texto tuyo que mejorar. Te dejo una guía "
+                        f"para que la escribas:\n\n{guia}"
+                    ),
+                }
+            return {
+                "tipo": "conversacion",
+                "respuesta": (
+                    f"En tu documento, {lista} todavía tiene solo el texto de ejemplo del "
+                    "formato («El texto expositivo es aquel texto que ofrece al lector…»), así "
+                    "que ahí no hay nada tuyo que pueda evaluar o mejorar.\n\n"
+                    "Cuando la redactes, vuelve a subir el documento y la reviso. Si quieres, "
+                    "pregúntame qué debe contener esa sección y te oriento para escribirla."
+                ),
+            }
+
     if intencion["modo"] == "conversacion":
         from .conversador import responder_consulta
         from .deps import get_biblioteca
 
+        nota = ""
+        if intencion.get("reclamo"):
+            # «¿Por qué sigues dándome antecedentes? Pregunto por la base teórica.»
+            nota = (
+                "[Nota del sistema: el estudiante reclama que tu respuesta anterior no correspondía a "
+                "lo que pidió. Reconócelo en UNA frase, sin disculpas largas, y responde ahora "
+                "exactamente lo que pide; revisa sus mensajes anteriores para entender qué preguntaba. "
+                "No repitas ni resumas la respuesta anterior.]"
+            )
         respuesta = responder_consulta(
             mensaje=req.mensaje,
             historial=historial,
             doc=doc,
             biblioteca=get_biblioteca(),
+            nota_sistema=nota,
         )
         analytics.registrar_evento(
             user_id, analytics.CONSULTA_RAPIDA,
@@ -603,7 +706,10 @@ def chat(req: ChatRequest, user: dict = Depends(usuario_actual)):
         texto = (res.get("texto_mejorado") or "").strip()
         # Guarda la mejora de sección como PENDIENTE (sin marcar evaluada): si luego dices
         # «evalúa mi <sección>», la red puede calificar TU mejora en vez del texto original.
-        if doc is not None and sec and len(texto) > 200:
+        # Solo si el estudiante NOMBRÓ esa sección: cuando el mini-grafo tenía que
+        # adivinarla («¿qué debería redactar primero?») guardaba una «versión
+        # mejorada» de la carátula o de cualquier sección, pisando su texto de trabajo.
+        if doc is not None and sec and len(texto) > 200 and secciones_mencionadas(req.mensaje, [sec]):
             mejoras.registrar_mejora_chat(doc, sec, texto)
             respuesta += (
                 f"\n\n---\n💡 Guardé esta versión mejorada de **{sec}**. Si quieres que la "

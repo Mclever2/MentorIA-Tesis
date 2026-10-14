@@ -27,6 +27,9 @@ import {
   obtenerRubricaUpao,
   streamRun,
   subirDocumento,
+  ApiError,
+  despertarServidor,
+  suscribirEstadoServidor,
   type AlcanceInfo,
   type FuenteDocumento,
   type ChatFlags,
@@ -40,6 +43,7 @@ import {
   guardarDocEnStorage,
   guardarMemoria,
   guardarAlcance,
+  guardarEnlaceEnStorage,
   guardarTextoEnStorage,
   leerDocPersistido,
   memoriaVacia,
@@ -79,6 +83,9 @@ export default function Chat({ session }: { session: Session | null }) {
   const [doc, setDoc] = useState<DocumentoInfo | null>(null);
   const [subiendo, setSubiendo] = useState(false);
   const [etapaSubida, setEtapaSubida] = useState("");
+  // El backend se está reiniciando (Cloud Run recicló su instancia): las peticiones
+  // se reintentan solas y aquí solo se avisa, para que no parezca un fallo.
+  const [servidorArrancando, setServidorArrancando] = useState(false);
   const [archivoPendiente, setArchivoPendiente] = useState<File | null>(null);
   const [ejecutando, setEjecutando] = useState(false);
   const [pasos, setPasos] = useState<PasoProgreso[]>([]);
@@ -127,6 +134,14 @@ export default function Chat({ session }: { session: Session | null }) {
   useEffect(() => {
     cargarConversaciones();
   }, [cargarConversaciones]);
+
+  useEffect(() => {
+    const desuscribir = suscribirEstadoServidor(setServidorArrancando);
+    // Al entrar se toca el backend: si se está reiniciando, el aviso sale antes de
+    // que el estudiante escriba, y no como error en su primer mensaje.
+    despertarServidor();
+    return desuscribir;
+  }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -281,12 +296,9 @@ export default function Chat({ session }: { session: Session | null }) {
         storagePath =
           fuente.tipo === "archivo"
             ? await guardarDocEnStorage(userId, convId, fuente.archivo)
-            : await guardarTextoEnStorage(
-                userId,
-                convId,
-                fuente.tipo === "texto" ? fuente.texto : "",
-                info.nombre,
-              );
+            : fuente.tipo === "texto"
+              ? await guardarTextoEnStorage(userId, convId, fuente.texto, info.nombre)
+              : await guardarEnlaceEnStorage(userId, convId, fuente.enlace, info.nombre);
         await guardarDocEnConversacion(convId, info, storagePath, docMemoriaRef.current);
       }
 
@@ -333,37 +345,92 @@ export default function Chat({ session }: { session: Session | null }) {
     }
   }
 
-  /** Garantiza un documento vivo en el backend (re-indexa si el chat se reabrió). */
-  async function asegurarDocVivo(): Promise<DocumentoInfo | null> {
-    if (doc) return doc;
+  /** Garantiza un documento vivo en el backend (re-indexa si el chat se reabrió).
+   *  `forzar` ignora el `doc` en memoria: el servidor avisó que ya no lo tiene. */
+  async function asegurarDocVivo(forzar = false): Promise<DocumentoInfo | null> {
+    if (doc && !forzar) return doc;
     const persistido = docPersistidoRef.current;
     if (!persistido) return null;
     setEtapaSubida("Reanudando tu proyecto…");
     setSubiendo(true);
     try {
-      const info = await rehidratar(persistido);
-      if (info) {
-        setDoc(info);
-        setProyectoDisponible(true);
-        setRubricaInfo(null);
+      let info: DocumentoInfo | null = null;
+      let motivo = "";
+      try {
+        info = await rehidratar(persistido);
+      } catch (exc) {
+        // Sin este catch, un documento guardado que ya no se puede reindexar
+        // salía como «Uncaught (in promise)» en la consola: el estudiante pulsaba
+        // Enter y no pasaba absolutamente nada, una y otra vez.
+        console.warn("[chat] No se pudo reanudar el proyecto:", exc);
+        motivo = exc instanceof Error ? exc.message : String(exc);
+      }
+      if (!info) {
         docPersistidoRef.current = null;
-        // El alcance es una decisión del estudiante: al re-indexar hay que
-        // reponerla, o el backend volvería a su sugerencia automática y podría
-        // calificar partes que él había dejado fuera.
-        if (persistido.alcance?.grupos?.length) {
-          try {
-            const res = await fijarAlcance(info.doc_id, { grupos: persistido.alcance.grupos });
-            setAlcance(res.alcance);
-          } catch {
-            setAlcance(persistido.alcance);
-          }
-        } else {
-          setAlcance(info.alcance ?? null);
+        setProyectoDisponible(false);
+        // Antes decía siempre «el archivo almacenado ya no es legible», también
+        // cuando lo que fallaba era el servidor reiniciándose.
+        agregarMensaje({
+          id: nuevoId(),
+          rol: "assistant",
+          contenido: motivo
+            ? `⚠️ No pude reanudar el proyecto guardado en este chat (${motivo}). ` +
+              "Vuelve a subirlo y seguimos donde lo dejamos."
+            : "⚠️ No pude recuperar el proyecto guardado en este chat (el archivo " +
+              "almacenado ya no es legible). Vuelve a subirlo y seguimos donde lo dejamos.",
+        });
+        return null;
+      }
+      setDoc(info);
+      setProyectoDisponible(true);
+      setRubricaInfo(null);
+      docPersistidoRef.current = null;
+      // El alcance es una decisión del estudiante: al re-indexar hay que
+      // reponerla, o el backend volvería a su sugerencia automática y podría
+      // calificar partes que él había dejado fuera.
+      if (persistido.alcance?.grupos?.length) {
+        try {
+          const res = await fijarAlcance(info.doc_id, { grupos: persistido.alcance.grupos });
+          setAlcance(res.alcance);
+        } catch {
+          setAlcance(persistido.alcance);
         }
+      } else {
+        setAlcance(info.alcance ?? null);
       }
       return info;
     } finally {
       setSubiendo(false);
+    }
+  }
+
+  /**
+   * Ejecuta `fn` con el proyecto vivo. Si el servidor responde 409 —se reinició y
+   * perdió el proyecto, que vive en su memoria—, lo re-indexa desde lo guardado en
+   * Supabase y reintenta UNA vez. Antes el mensaje seguía sin proyecto y el mentor
+   * contestaba como si el estudiante no hubiera subido nada.
+   */
+  async function conProyectoVivo<T>(
+    convId: string | null,
+    docActivo: DocumentoInfo | null,
+    fn: (docId: string | null) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await fn(docActivo?.doc_id ?? null);
+    } catch (exc) {
+      if (!(exc instanceof ApiError && exc.status === 409)) throw exc;
+      setDoc(null);
+      const persistido = convId ? await leerDocPersistido(convId) : null;
+      if (!persistido) {
+        setProyectoDisponible(false);
+        throw exc;
+      }
+      // La memoria del hilo más reciente es la de este cliente, no la guardada.
+      docPersistidoRef.current = { ...persistido, memoria: docMemoriaRef.current };
+      const info = await asegurarDocVivo(true);
+      // asegurarDocVivo ya le explicó al estudiante qué pasó.
+      if (!info) throw new ApiError("", 409, true);
+      return fn(info.doc_id);
     }
   }
 
@@ -576,8 +643,15 @@ export default function Chat({ session }: { session: Session | null }) {
 
     setEjecutando(true);
     try {
+      // Si a mitad de la lista el servidor perdió el proyecto, los siguientes
+      // adjuntos van al proyecto re-indexado.
+      let vivo: DocumentoInfo = docActivo;
       for (const adjunto of adjuntos) {
-        const res = await agregarFragmento(docActivo.doc_id, adjunto.texto, adjunto.nombre);
+        const res = await conProyectoVivo(convId, vivo, async (id) => {
+          const r = await agregarFragmento(id ?? vivo.doc_id, adjunto.texto, adjunto.nombre);
+          if (id) vivo = { ...vivo, doc_id: id };
+          return r;
+        });
         agregarMensaje({ id: nuevoId(), rol: "assistant", contenido: res.mensaje }, convId);
         if (res.seccion) {
           docMemoriaRef.current.pendientes[res.seccion] = adjunto.texto;
@@ -585,11 +659,13 @@ export default function Chat({ session }: { session: Session | null }) {
         }
       }
     } catch (exc) {
-      agregarMensaje({
-        id: nuevoId(),
-        rol: "assistant",
-        contenido: `⚠️ No pude indexar el texto pegado: ${exc instanceof Error ? exc.message : exc}`,
-      }, convId);
+      if (!(exc instanceof ApiError && exc.silencioso)) {
+        agregarMensaje({
+          id: nuevoId(),
+          rol: "assistant",
+          contenido: `⚠️ No pude indexar el texto pegado: ${exc instanceof Error ? exc.message : exc}`,
+        }, convId);
+      }
     } finally {
       setEjecutando(false);
     }
@@ -627,15 +703,17 @@ export default function Chat({ session }: { session: Session | null }) {
     setEjecutando(true);
     setPasos([]);
     try {
-      const resp = await enviarChat({
-        mensaje: texto,
-        doc_id: docActivo?.doc_id ?? null,
-        conversacion_id: convId,
-        max_iteraciones: iteraciones,
-        contexto_previo: ultimoInforme.slice(0, 6000),
-        historial,
-        ...flags,
-      });
+      const resp = await conProyectoVivo(convId, docActivo, (docId) =>
+        enviarChat({
+          mensaje: texto,
+          doc_id: docId,
+          conversacion_id: convId,
+          max_iteraciones: iteraciones,
+          contexto_previo: ultimoInforme.slice(0, 6000),
+          historial,
+          ...flags,
+        }),
+      );
 
       if (resp.tipo === "conversacion") {
         agregarMensaje(
@@ -706,14 +784,16 @@ export default function Chat({ session }: { session: Session | null }) {
       }
       pendienteRef.current = null;
     } catch (exc) {
-      agregarMensaje(
-        {
-          id: nuevoId(),
-          rol: "assistant",
-          contenido: `⚠️ ${exc instanceof Error ? exc.message : exc}`,
-        },
-        convId,
-      );
+      if (!(exc instanceof ApiError && exc.silencioso)) {
+        agregarMensaje(
+          {
+            id: nuevoId(),
+            rol: "assistant",
+            contenido: `⚠️ ${exc instanceof Error ? exc.message : exc}`,
+          },
+          convId,
+        );
+      }
     } finally {
       setEjecutando(false);
       setPasos([]);
@@ -823,6 +903,7 @@ export default function Chat({ session }: { session: Session | null }) {
                 onArchivo={manejarArchivo}
                 onEnlace={(url) => subirTesis({ tipo: "enlace", enlace: url })}
               />
+              {servidorArrancando && <AvisoServidor />}
               <ChatInput
                 ejecutando={ejecutando}
                 deshabilitado={subiendo}
@@ -959,6 +1040,7 @@ export default function Chat({ session }: { session: Session | null }) {
                   </div>
                 )}
 
+                {servidorArrancando && <AvisoServidor />}
                 <ChatInput
                   ejecutando={ejecutando}
                   deshabilitado={subiendo}
@@ -985,6 +1067,19 @@ export default function Chat({ session }: { session: Session | null }) {
           <ReglamentoModal reglamento={reglamentoInfo} onCerrar={() => setVerReglamento(false)} />
         )}
       </main>
+    </div>
+  );
+}
+
+/** Aviso mientras el backend arranca: los pedidos esperan y se reintentan solos. */
+function AvisoServidor() {
+  return (
+    <div className="mb-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-[13px] text-foreground/90 flex items-center gap-2">
+      <Loader2 className="w-4 h-4 animate-spin text-amber-500 shrink-0" />
+      <span>
+        El servidor se está iniciando (puede tardar hasta un minuto). Lo que pidas se enviará en
+        cuanto esté listo; no hace falta que vuelvas a intentarlo.
+      </span>
     </div>
   );
 }

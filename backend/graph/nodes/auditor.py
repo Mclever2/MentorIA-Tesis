@@ -510,7 +510,13 @@ Tu tarea principal ahora es VERIFICAR SI ESTOS ERRORES FUERON CORREGIDOS en el n
                 f"[Auditor] La reescritura bajó el puntaje "
                 f"({puntaje_total_consolidado} < {mejor_prev}) — revierto a la mejor versión"
             )
-            ret_dict["texto_iterado"]         = state.get("mejor_texto") or state.get("texto_iterado")
+            texto_rev = state.get("mejor_texto") or state.get("texto_iterado")
+            # La mejor versión del título puede ser el contexto crudo (título + línea de
+            # investigación de la portada): se entrega solo el título.
+            from .redactor import _es_seccion_titulo, _recortar_titulo
+            if texto_rev and _es_seccion_titulo(seccion):
+                texto_rev = _recortar_titulo(texto_rev)
+            ret_dict["texto_iterado"]         = texto_rev
             ret_dict["puntaje_estimado"]      = float(mejor_prev)
             ret_dict["errores_rubrica"]       = state.get("mejor_errores") or errores_filtrados
             ret_dict["evaluacion_upao_final"] = state.get("mejor_eval_final") or items_consolidados

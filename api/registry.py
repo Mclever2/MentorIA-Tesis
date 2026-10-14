@@ -49,6 +49,10 @@ class DocumentoActivo:
     # bajaban la nota por trabajo que todavía no tocaba entregar.
     # {"grupos": [...], "items": [int], "modo": "auto"|"declarado"}
     alcance: dict = field(default_factory=dict)
+    # Título real del proyecto (sección «1. Título» o carátula), "" si no lo escribió.
+    titulo_proyecto: str = ""
+    # Secciones que solo conservan el texto de ejemplo del formato: no se indexan.
+    secciones_plantilla: list = field(default_factory=list)
 
 
 @dataclass

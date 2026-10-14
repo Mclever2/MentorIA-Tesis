@@ -39,7 +39,10 @@ from backend.metodologia_reglas import (
     COLUMNAS_MATRIZ,
     COLUMNAS_OPERACIONALIZACION,
     MARGEN_ERROR_MAXIMO,
+    CRITERIOS_DISENO_INGENIERIA,
+    PERFIL_COMPARACION_TEXTO,
     bloque_validacion,
+    perfil_comparacion,
     requiere_validacion_experta,
     tamano_muestra,
     verificar_matriz,
@@ -154,17 +157,35 @@ class FaseProcedimiento(BaseModel):
 
 class SalidaMetodologico(BaseModel):
     tipo_investigacion: str = Field(
-        description="Según finalidad (básica/aplicada), técnica de contrastación (preexperimental, "
-                    "cuasiexperimental, experimental puro, descriptiva, correlacional) y nivel."
+        description="Según finalidad (básica/aplicada), técnica de contrastación y nivel, COHERENTE con "
+                    "el diseño: experimental (experimento computacional) si compara un modelo contra "
+                    "una línea base; preexperimental si mide personas antes y después; cuasiexperimental "
+                    "solo con grupo control real; descriptiva/tecnológica si solo construye y valida. "
+                    "Nivel explicativo si contrasta una mejora, descriptivo si solo describe."
     )
     enfoque: str = Field(description="Cuantitativo, cualitativo o mixto, y por qué ese.")
-    diseno: str = Field(description="Diseño y su esquema (p. ej. G.E.: O1 X O2 / G.C.: O3 - O4).")
+    diseno: str = Field(
+        description="Diseño y su esquema, según lo que se compare: preexperimental G: O1 X O2 cuando "
+                    "se mide el efecto en personas/procesos; experimento computacional pareado "
+                    "(mismo conjunto de prueba con la propuesta y con la línea base) cuando se mide "
+                    "un modelo o sistema; cuasiexperimental G.E./G.C. solo si existe un grupo control real."
+    )
     unidad_analisis: str = Field(description="A quién o a qué se mide. Es lo que define la población.")
     criterio_poblacion: str = Field(
         description="Cómo se delimita la población SEGÚN EL DISEÑO elegido, y si conviene censo o muestreo."
     )
     fases: list[FaseProcedimiento] = Field(description="Procedimiento de ejecución por fases.")
     tecnicas_recoleccion: list[str] = Field(description="Técnicas e instrumentos, emparejados a cada indicador.")
+    aplica_formula_muestral: bool = Field(
+        description="False si la unidad de análisis son instancias de un conjunto de datos para "
+                    "evaluar un modelo o sistema (se usa partición de prueba o validación cruzada), "
+                    "o si conviene censo. True solo si se muestrean personas o registros de una "
+                    "población finita."
+    )
+    justificacion_muestra: str = Field(
+        description="Cómo se define el tamaño de la muestra en ESTE diseño (partición de prueba, "
+                    "k pliegues, censo o fórmula de población finita) y por qué."
+    )
     tecnicas_procesamiento: list[str] = Field(
         description="Estadística que corresponde al diseño y a la escala: descriptiva, prueba de "
                     "normalidad, y la prueba de hipótesis que toca (t de Student pareada, Wilcoxon, "
@@ -206,6 +227,10 @@ si mejoró. Comprueba si el título las deja ver:
   · Si el medio y el fin están confundidos, dilo.
 Si las variables no se leen bien, ESE es el primer hallazgo y hay que corregir el título antes de
 seguir: operacionalizar sobre un título ambiguo produce una tabla que no defiende nada.
+Si ni el título ni lo que escribió dejan ver la VD, NO TE LA INVENTES (ni «satisfacción» ni ninguna
+otra): en la lectura pon «no se identifica», en la corrección del título deja el marcador
+[qué vas a medir] y en la fila de la VD escribe «[por definir: ¿qué vas a medir para saber si
+mejoró?]», con 2 o 3 opciones típicas del tema marcadas explícitamente como opciones a elegir.
 
 LAS COLUMNAS son estas y en este orden: {columnas}.
 
@@ -239,6 +264,11 @@ FUNDAMENTO METODOLÓGICO (libros indexados — de aquí sacas las técnicas, no 
 
 REGLAS QUE APLICAS:
 
+0. PRIMERO, LO QUE YA DECLARÓ. Si en su documento ya dice qué tipo, diseño, hipótesis o variables
+   tiene, PARTE DE ESO: respétalo y solo señala lo que sea incoherente (p. ej. declara
+   preexperimental pero su hipótesis compara contra una línea base). No lo reemplaces por un diseño
+   distinto sin decir por qué el suyo no funciona.
+
 1. ENFOQUE. Para Ingeniería, cuantitativo o mixto por encima de cualitativo: son los que permiten
    demostrar mejora con una medición comparable. Un componente cualitativo puede acompañar para
    caracterizar requisitos, pero el peso demostrativo tiene que ser cuantitativo.
@@ -252,6 +282,9 @@ REGLAS QUE APLICAS:
      grupos comparables y hay que decir en qué se parecen.
    · Experimental puro: exige asignación aleatoria; en un contexto organizacional casi nunca es
      viable, y prometerlo sin poder cumplirlo es un problema. Dilo si es el caso.
+
+2b. DISEÑO SEGÚN LO QUE SE COMPARA:
+{criterios_diseno}
 
 3. PROCEDIMIENTO POR FASES ALINEADAS A LOS OBJETIVOS. Las fases se derivan de los objetivos
    específicos, pero NO es uno por fase: una fase puede cubrir varios objetivos y un objetivo puede
@@ -372,7 +405,12 @@ def _componer_metodologico(d: dict, muestra: dict | None, fuentes: list[str]) ->
         f"- **Cómo se delimita:** {d.get('criterio_poblacion','')}",
     ]
 
-    if muestra:
+    if d.get("justificacion_muestra"):
+        partes.append(f"- **Tamaño de la muestra:** {d['justificacion_muestra']}")
+
+    if not d.get("aplica_formula_muestral", True):
+        pass
+    elif muestra:
         partes.append(
             "### Cálculo del tamaño de muestra\n\n"
             f"Población (N) = **{muestra['poblacion']}** · Confianza = **{muestra['confianza']:.0f} %** "
@@ -431,7 +469,7 @@ def _componer_metodologico(d: dict, muestra: dict | None, fuentes: list[str]) ->
 
 # ── Matriz de consistencia ──────────────────────────────────────────────────
 
-_RE_ENUMERADO = re.compile(r"^\s*(?:\d+[.)]|[-*•]|[a-z][.)])\s+", re.M)
+_RE_ENUMERADO = re.compile(r"^\s*(?:\d+[.)]|[-*•●○▪■◦–]|[a-z][.)])\s+", re.M)
 
 
 def _contar_elementos(texto: str, marcador: re.Pattern) -> list[str]:
@@ -439,11 +477,89 @@ def _contar_elementos(texto: str, marcador: re.Pattern) -> list[str]:
     m = marcador.search(texto or "")
     if not m:
         return []
-    resto = texto[m.end(): m.end() + 1800]
-    corte = re.search(r"\n\s*(?:problemas?|preguntas?|hip[oó]tesis|objetivos?|variables?|metodolog|poblaci)", resto, re.I)
+    resto = texto[m.end(): m.end() + 2400]
+    # Salta el resto de la línea del rótulo y los rótulos repetidos que le siguen
+    # («[1.2.2. Objetivos específicos]» y luego «1.2.2. Objetivos específicos»): el
+    # corte por encabezado se detenía ahí y no devolvía ningún objetivo.
+    resto = resto.split("\n", 1)[1] if "\n" in resto else ""
+    while True:
+        primera, _, siguiente = resto.lstrip("\r\n ").partition("\n")
+        if primera and marcador.search(primera) and len(primera) < 80:
+            resto = siguiente
+            continue
+        break
+    corte = re.search(r"\n\s*(?:problemas?|preguntas?|hip[oó]tesis|objetivos?|variables?|metodolog|poblaci|"
+                      r"\d+(?:\.\d+)+\.?\s+[A-ZÁÉÍÓÚ])", resto, re.I)
     if corte:
         resto = resto[: corte.start()]
-    return [l.strip() for l in _RE_ENUMERADO.split(resto) if len(l.strip()) > 15]
+    items = [" ".join(l.split()) for l in _RE_ENUMERADO.split(resto) if len(l.strip()) > 15]
+    # Los fragmentos del índice se solapan: el mismo objetivo aparece cortado y luego
+    # completo. Se queda el completo (contaba 5 objetivos donde había 4).
+    unicos: list[str] = []
+    for it in items:
+        if any(o.startswith(it) for o in items if o != it):
+            continue
+        if it not in unicos:
+            unicos.append(it)
+    return unicos
+
+
+_PALABRAS_VACIAS_OBJ = {"de", "del", "la", "las", "los", "el", "y", "e", "en", "con", "para", "por",
+                        "a", "un", "una", "que", "su", "sus", "al", "se", "o", "mediante", "como"}
+
+
+def _tokens_obj(texto: str) -> set[str]:
+    return {w[:6] for w in re.findall(r"[a-záéíóúñ]+", (texto or "").lower())
+            if len(w) > 2 and w not in _PALABRAS_VACIAS_OBJ}
+
+
+def _corto(texto: str, n: int = 14) -> str:
+    palabras = " ".join(texto.split()).split(" ")
+    return " ".join(palabras[:n]).rstrip(",;:.") + ("…" if len(palabras) > n else "")
+
+
+def _anclar_objetivos_fases(fases: list[dict], objetivos: list[str]) -> None:
+    """Cada «objetivo que avanza» tiene que ser uno de SUS objetivos específicos. El
+    modelo parafraseaba o inventaba objetivos («Diseñar y desarrollar el prototipo…»)
+    que el estudiante no tenía; aquí se sustituyen por el suyo más parecido y se
+    descartan los que no se parecen a ninguno."""
+    if not objetivos:
+        return
+    toks = [_tokens_obj(o) for o in objetivos]
+
+    def _verbo(texto: str) -> str:
+        m = re.match(r"\W*([a-záéíóúñ]+)", (texto or "").lower())
+        return m.group(1)[:6] if m else ""
+
+    verbos = [_verbo(o) for o in objetivos]
+
+    def _mejor(texto: str, umbral: float = 0.5) -> int | None:
+        ref = re.search(r"\b(?:OE|objetivo\s+espec[ií]fico\s*(?:n\.?[°º]?\s*)?)(\d)\b", texto, re.I)
+        if ref and 1 <= int(ref.group(1)) <= len(objetivos):
+            return int(ref.group(1)) - 1
+        t = _tokens_obj(texto)
+        if not t:
+            return None
+        # Mismo verbo inicial y algo más en común: es ese objetivo citado a medias.
+        v = _verbo(texto)
+        for k, o in enumerate(toks):
+            if v and v == verbos[k] and len(t & o) >= 2:
+                return k
+        puntajes = [len(t & o) / max(1, min(len(t), len(o))) for o in toks]
+        i = max(range(len(objetivos)), key=lambda k: puntajes[k])
+        return i if puntajes[i] >= umbral else None
+
+    for f in fases:
+        indices: list[int] = []
+        for item in f.get("objetivos_que_cubre") or []:
+            i = _mejor(item)
+            if i is not None and i not in indices:
+                indices.append(i)
+        if not indices:                    # ninguno era suyo: se ancla por lo que hace la fase
+            i = _mejor(f"{f.get('fase', '')} {f.get('actividades', '')}", umbral=0.4)
+            if i is not None:
+                indices.append(i)
+        f["objetivos_que_cubre"] = [f"OE{i + 1}: {_corto(objetivos[i])}" for i in sorted(indices)]
 
 
 def _componer_matriz(proyecto: str) -> str:
@@ -505,19 +621,55 @@ def _poblacion_declarada(texto: str) -> int | None:
         n = int(m.group(1))
     except (TypeError, ValueError):
         return None
+    # Un año suelto («de 2026») no es una población.
+    if 1900 <= n <= 2100 and not re.search(r"\d\s*[a-záéíóúñ]", m.group(0)[len(m.group(1)) - 1:]):
+        return None
     return n if 1 < n <= 5_000_000 else None
 
 
 # ── Entrada pública ─────────────────────────────────────────────────────────
+
+# Secciones del documento que condicionan la metodología: la cadena (problema,
+# objetivos), hipótesis y variables, y el tipo/diseño que ya declaró (en la
+# portada «3.1/3.2 De acuerdo con…» o en el capítulo 4).
+_RE_SECCIONES_METODOLOGIA = re.compile(
+    r"^\s*1\.(1|2)\b|problema|objetivo|hip[oó]tesis|variable|matriz|"
+    r"tipo|acuerdo|orientaci|contrastaci|aplicad|enfoque|m[eé]todo|dise[nñ]o|poblaci|muestra|"
+    r"t[eé]cnica|instrumento|procedimiento",
+    re.I,
+)
+
 
 def responder_metodologia(mensaje: str, historial: list[dict], doc, biblioteca) -> dict:
     """Operacionalización, matriz de consistencia o marco metodológico."""
     from .ideacion import _interes_del_hilo, _invocar, _libros
     from .planteamiento import _titulo_del_hilo
 
+    from .planteamiento import _cadena_redactada
+
     contexto = _interes_del_hilo(mensaje, historial)
     titulo = _titulo_del_hilo(mensaje, historial, doc)
-    proyecto = "\n".join(p for p in (f"TÍTULO: {titulo}" if titulo else "", contexto) if p)
+    # Lo que YA escribió: sin esto el panel diseñaba la metodología solo desde el
+    # título y proponía un diseño ajeno al que el estudiante había declarado.
+    escrito = _cadena_redactada(doc, max_chars=6000, patron=_RE_SECCIONES_METODOLOGIA)
+    perfil = perfil_comparacion(" ".join((titulo or "", escrito or "", contexto or "")))
+    # Los objetivos se leen de SU sección completa: `escrito` se trunca y el último
+    # objetivo quedaba fuera.
+    _re_oe = re.compile(r"objetivos?\s+espec[ií]fic", re.I)
+    texto_oe = _cadena_redactada(doc, max_chars=4000, patron=_re_oe) if doc is not None else ""
+    objetivos_est = (_contar_elementos(texto_oe, _re_oe)
+                     or _contar_elementos("\n".join((escrito or "", contexto or "")), _re_oe))
+    proyecto = "\n\n".join(p for p in (
+        f"TÍTULO: {titulo}" if titulo else "",
+        f"LO QUE YA ESCRIBIÓ EN SU DOCUMENTO:\n{escrito}" if escrito else "",
+        f"LO QUE DICE EN EL CHAT:\n{contexto}" if contexto else "",
+        ("SUS OBJETIVOS ESPECÍFICOS (en «objetivos_que_cubre» usa SOLO estos, con su texto; no "
+         "inventes otros):\n" + "\n".join(f"OE{i}. {o}" for i, o in enumerate(objetivos_est, 1)))
+        if objetivos_est else "",
+        PERFIL_COMPARACION_TEXTO[perfil] + " Si el estudiante YA declaró un diseño, manda lo "
+        "declarado: usa esta clasificación solo para señalarle una incoherencia, no para cambiárselo.",
+    ) if p)
+    logger.info(f"[metodologia] Perfil de comparación: {perfil}")
 
     quiere_matriz = bool(re.search(r"matriz de consistencia", mensaje, re.I))
     quiere_metodologico = bool(re.search(
@@ -548,6 +700,7 @@ def responder_metodologia(mensaje: str, historial: list[dict], doc, biblioteca) 
     modelo = llm_rapido(temperatura=0.25)
     base = {
         "regla_voz": _REGLA_VOZ, "regla_no_inventar": _REGLA_NO_INVENTAR,
+        "criterios_diseno": CRITERIOS_DISENO_INGENIERIA,
         "proyecto": proyecto or "(sin contexto)", "libros": libros_txt or "(sin fragmentos)",
     }
 
@@ -561,14 +714,38 @@ def responder_metodologia(mensaje: str, historial: list[dict], doc, biblioteca) 
         )
         if d is None:
             return {"respuesta": _FALLBACK, "titulo": titulo, "seccion": None}
-        n = _poblacion_declarada(proyecto)
+        # La población se toma de lo que dice en el CHAT: en el texto del documento
+        # cualquier «de 2027» pasaba por población y salía una muestra absurda.
+        n = _poblacion_declarada(contexto)
         muestra = None
         if n:
             try:
                 muestra = tamano_muestra(n)
             except ValueError as exc:                          # noqa: BLE001
                 logger.warning(f"[metodologia] Cálculo muestral no aplicable: {exc}")
-        respuesta = _componer_metodologico(d.model_dump(), muestra, fuentes)
+        datos = d.model_dump()
+        # El modelo rellena «tipo» y «diseño» por separado y a veces se contradice
+        # («tipo: experimental» con «diseño: preexperimental»). El diseño manda.
+        if re.search(r"pre-?\s*experimental", datos.get("diseno", ""), re.I):
+            datos["tipo_investigacion"] = re.sub(
+                r"(?<![\w-])(?<!no )experimental", "preexperimental",
+                datos.get("tipo_investigacion", ""), flags=re.I,
+            )
+        _anclar_objetivos_fases(datos.get("fases") or [], objetivos_est)
+        respuesta = _componer_metodologico(datos, muestra, fuentes)
+        # Incoherencia que el modelo arrastra al respetar lo declarado: «no
+        # experimental» junto a un experimento que compara contra una línea base.
+        tipo_txt = f"{d.tipo_investigacion} {escrito or ''}".lower()
+        if (perfil == "computacional" and "no experimental" in tipo_txt
+                and re.search(r"experiment|l[ií]nea\s+base|compar", d.diseno, re.I)):
+            respuesta += (
+                "\n\n> ⚠️ **Revisa cómo clasificas tu diseño.** Lo declaras *no experimental*, pero "
+                "comparas tu propuesta contra una línea base aplicando cada método a los mismos datos: "
+                "eso es un diseño **experimental** (experimento computacional). Tienes dos caminos: "
+                "reclasificarlo como experimental, o mantener «no experimental» y quitar la comparación "
+                "de tus hipótesis y objetivos. Lo que no se sostiene ante el jurado es declarar una cosa y "
+                "hacer la otra."
+            )
         logger.info(f"[metodologia] Marco metodológico | población detectada: {n}")
     else:
         o = _invocar(

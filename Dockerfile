@@ -18,8 +18,10 @@ RUN pip install --no-cache-dir \
     --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Python dependencies (layer cached unless requirements.txt changes)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# constraints.txt fija las versiones exactas de producción: sin él, un rebuild sin
+# caché (p. ej. cuando cambia la imagen base) resolvía librerías nuevas incompatibles.
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Pre-download HuggingFace embedding model during build (baked into image).
 # Stored at /root/.cache/huggingface/ — no network access needed at runtime.

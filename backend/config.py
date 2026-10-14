@@ -17,6 +17,15 @@ LIBRARY_CHROMA_PATH = os.path.join(_ROOT, "chroma_db", "biblioteca")
 BOOKS_PRELOAD_DIR   = os.path.join(_ROOT, "books")
 
 
+def modelo_llm() -> str:
+    """Modelo de OpenAI de toda la red (agentes, paneles, chat). Se cambia con la
+    variable de entorno OPENAI_MODEL sin tocar código; por defecto gpt-4.1-mini, que
+    sigue instrucciones largas mucho mejor que gpt-4o-mini a un costo todavía bajo.
+    La métrica complementaria (LLM-as-judge) NO lo usa: queda fija en gpt-4o-mini
+    para que sus puntajes sigan siendo comparables entre versiones."""
+    return (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+
+
 RUBRICA_ITEMS_UPAO: dict[int, str] = {
     1:  "El título es claro, conciso y refleja fielmente el contenido y el propósito de la investigación.",
     2:  "El título articula las variables, espacio y tiempo de la investigación.",
@@ -121,6 +130,14 @@ _PORTADA_UPAO: dict[str, tuple[str, ...]] = {
     "8":   ("horas", "dedicadas"),
 }
 
+# Respuestas con las que el estudiante sobrescribe el rótulo de «3 Tipo de
+# investigación» de la portada (orientación y técnica de contrastación).
+_PORTADA_UPAO_RESPUESTAS: dict[str, tuple[str, ...]] = {
+    "3.1": ("aplicada", "basica", "tecnologica", "orientacion", "finalidad"),
+    "3.2": ("enfoque", "cuantitativ", "cualitativ", "mixt", "descriptiv", "explicativ",
+            "correlacional", "experimental", "contrastacion"),
+}
+
 # Las dos secciones de portada que SÍ son evidencia de rúbrica (ítem 3).
 _PORTADA_AL_TITULO = {"4", "5.1"}
 
@@ -133,7 +150,12 @@ def _clave_portada_upao(seccion: str) -> str | None:
         return None
     texto = unicodedata.normalize("NFKD", seccion).encode("ascii", "ignore").decode().lower()
     if not all(palabra in texto for palabra in requeridas):
-        return None
+        # Muchos estudiantes reemplazan el rótulo por su respuesta: «3.1. Investigación
+        # Aplicada», «3.2. Investigación de enfoque cuantitativo…». Por el prefijo se
+        # mapeaban a Hipótesis (18-19) o a Tipo/Método (22-23) y se calificaban como tales.
+        alternativas = _PORTADA_UPAO_RESPUESTAS.get(prefijo, ())
+        if not any(p in texto for p in alternativas) or any(p in texto for p in ("hipotesis", "supuesto")):
+            return None
     return "1. Título del proyecto" if prefijo in _PORTADA_AL_TITULO else PORTADA_UPAO
 
 

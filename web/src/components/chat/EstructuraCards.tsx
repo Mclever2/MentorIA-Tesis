@@ -96,8 +96,14 @@ export default function EstructuraCards({
       </div>
 
       <p className="mt-3 text-xs text-muted-foreground">
-        Las secciones con <AlertTriangle className="w-3 h-3 inline text-[#FF9500]" /> tienen poco
-        contenido — probablemente aún no las has redactado. Ya puedes pedir la revisión en el chat.
+        {stats.some((s) => s.chars < 200) && (
+          <>
+            Las secciones marcadas con <AlertTriangle className="w-3 h-3 inline text-[#FF9500]" />
+            <span className="sr-only">⚠</span> tienen poco contenido — probablemente aún no las
+            has redactado.{" "}
+          </>
+        )}
+        Ya puedes pedir la revisión en el chat.
       </p>
     </div>
   );

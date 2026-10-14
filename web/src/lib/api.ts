@@ -75,6 +75,19 @@ async function authHeaders(): Promise<Record<string, string>> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** Error de la API con su código HTTP (0 = no hubo respuesta: red caída o CORS). */
+export class ApiError extends Error {
+  status: number;
+  /** El usuario ya fue avisado por otra vía: no hace falta otro mensaje de error. */
+  silencioso: boolean;
+  constructor(mensaje: string, status: number, silencioso = false) {
+    super(mensaje);
+    this.name = "ApiError";
+    this.status = status;
+    this.silencioso = silencioso;
+  }
+}
+
 async function manejarError(res: Response): Promise<never> {
   let detalle = `Error ${res.status}`;
   try {
@@ -83,7 +96,89 @@ async function manejarError(res: Response): Promise<never> {
   } catch {
     /* respuesta sin JSON */
   }
-  throw new Error(detalle);
+  throw new ApiError(detalle, res.status);
+}
+
+// ── Servidor arrancando ───────────────────────────────────────────────────────
+// El backend corre en UNA instancia de Cloud Run (el registro de proyectos vive en
+// memoria). Cuando Cloud Run la recicla —pasa cada uno o dos días, y en cada
+// despliegue— la nueva tarda ~1 min en cargar modelos y, mientras tanto, Cloud Run
+// responde 429 «no available instance» SIN cabeceras CORS: el navegador lo ve como
+// «Failed to fetch». Eso le llegaba al estudiante como un error en su primer mensaje
+// tras entrar, o como «el archivo almacenado ya no es legible». Ahora se reintenta
+// con espera creciente y la pantalla avisa que el servidor está arrancando.
+type OyenteServidor = (arrancando: boolean) => void;
+const oyentes = new Set<OyenteServidor>();
+
+export function suscribirEstadoServidor(fn: OyenteServidor): () => void {
+  oyentes.add(fn);
+  return () => {
+    oyentes.delete(fn);
+  };
+}
+
+let esperando = 0;
+function marcarEspera(delta: 1 | -1) {
+  const antes = esperando > 0;
+  esperando = Math.max(0, esperando + delta);
+  if (antes !== esperando > 0) oyentes.forEach((fn) => fn(esperando > 0));
+}
+
+const ESPERA_MAX_MS = 150_000;
+// 429 = Cloud Run no tenía instancia lista: la petición nunca llegó a la app y
+// reintentarla es inocuo. 502/503/504 sí pudieron llegar (p. ej. una instancia que
+// murió por memoria a mitad de indexar): un POST se reintenta una sola vez.
+const SIN_INSTANCIA = 429;
+const FALLOS_PASARELA = new Set([502, 503, 504]);
+
+async function fetchApi(ruta: string, init: RequestInit = {}): Promise<Response> {
+  const inicio = Date.now();
+  const metodo = (init.method ?? "GET").toUpperCase();
+  const maxPasarela = metodo === "GET" ? 4 : 1;
+  let intento = 0;
+  let fallosPasarela = 0;
+  let enEspera = false;
+  try {
+    for (;;) {
+      let res: Response | null = null;
+      try {
+        res = await fetch(`${API_URL}${ruta}`, {
+          ...init,
+          headers: { ...(init.headers as Record<string, string> | undefined), ...(await authHeaders()) },
+        });
+      } catch (exc) {
+        if (exc instanceof DOMException && exc.name === "AbortError") throw exc;
+        res = null; // red caída, o el 429 de Cloud Run sin cabeceras CORS
+      }
+      if (res && res.status !== SIN_INSTANCIA && !FALLOS_PASARELA.has(res.status)) return res;
+      if (res && FALLOS_PASARELA.has(res.status) && ++fallosPasarela > maxPasarela) return res;
+      if (Date.now() - inicio > ESPERA_MAX_MS) {
+        if (res) return res;
+        throw new ApiError(
+          "No pude conectar con el servidor. Revisa tu conexión e inténtalo de nuevo en un momento.",
+          0,
+        );
+      }
+      if (!enEspera) {
+        enEspera = true;
+        marcarEspera(1);
+      }
+      intento += 1;
+      await new Promise((r) => setTimeout(r, Math.min(1500 * intento, 8000)));
+    }
+  } finally {
+    if (enEspera) marcarEspera(-1);
+  }
+}
+
+/** Toca el backend sin autenticar: si se está reiniciando, el aviso aparece antes
+ *  de que el estudiante envíe nada. Nunca lanza. */
+export async function despertarServidor(): Promise<void> {
+  try {
+    await fetchApi("/health");
+  } catch {
+    /* el siguiente pedido real mostrará el error si sigue caído */
+  }
 }
 
 export interface DocMemoria {
@@ -117,9 +212,8 @@ export async function subirDocumento(
     form.append("enlace", origen.enlace);
   }
   if (memoria) form.append("memoria", JSON.stringify(memoria));
-  const res = await fetch(`${API_URL}/api/documentos`, {
+  const res = await fetchApi("/api/documentos", {
     method: "POST",
-    headers: await authHeaders(),
     body: form,
   });
   if (!res.ok) await manejarError(res);
@@ -133,9 +227,9 @@ export async function agregarFragmento(
   texto: string,
   nombre = "Texto pegado",
 ): Promise<{ seccion: string | null; mensaje: string }> {
-  const res = await fetch(`${API_URL}/api/fragmento`, {
+  const res = await fetchApi("/api/fragmento", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ doc_id: docId, texto, nombre }),
   });
   if (!res.ok) await manejarError(res);
@@ -144,9 +238,7 @@ export async function agregarFragmento(
 
 /** Grupos evaluables + alcance actual del proyecto. */
 export async function obtenerAlcance(docId: string): Promise<CatalogoAlcance> {
-  const res = await fetch(`${API_URL}/api/alcance?doc_id=${encodeURIComponent(docId)}`, {
-    headers: await authHeaders(),
-  });
+  const res = await fetchApi(`/api/alcance?doc_id=${encodeURIComponent(docId)}`);
   if (!res.ok) await manejarError(res);
   return res.json();
 }
@@ -156,9 +248,9 @@ export async function fijarAlcance(
   docId: string,
   opciones: { grupos?: string[]; todo?: boolean },
 ): Promise<{ alcance: AlcanceInfo }> {
-  const res = await fetch(`${API_URL}/api/alcance`, {
+  const res = await fetchApi("/api/alcance", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ doc_id: docId, grupos: opciones.grupos ?? null, todo: !!opciones.todo }),
   });
   if (!res.ok) await manejarError(res);
@@ -168,18 +260,14 @@ export async function fijarAlcance(
 /** Rúbrica oficial UPAO (fija). Con `docId` incluye el mapeo ítem→secciones del proyecto. */
 export async function obtenerRubricaUpao(docId?: string | null): Promise<RubricaUpaoInfo> {
   const qs = docId ? `?doc_id=${encodeURIComponent(docId)}` : "";
-  const res = await fetch(`${API_URL}/api/rubrica${qs}`, {
-    headers: await authHeaders(),
-  });
+  const res = await fetchApi(`/api/rubrica${qs}`);
   if (!res.ok) await manejarError(res);
   return res.json();
 }
 
 /** Reglamento UPAO fijo: vigencia, resolución y puntos que afectan la tesis. */
 export async function obtenerReglamentoUpao(): Promise<ReglamentoInfo> {
-  const res = await fetch(`${API_URL}/api/reglamento`, {
-    headers: await authHeaders(),
-  });
+  const res = await fetchApi("/api/reglamento");
   if (!res.ok) await manejarError(res);
   return res.json();
 }
@@ -188,9 +276,7 @@ export async function obtenerBiblioteca(): Promise<{
   libros: { nombre: string; fragmentos: number }[];
   total_fragmentos: number;
 }> {
-  const res = await fetch(`${API_URL}/api/biblioteca`, {
-    headers: await authHeaders(),
-  });
+  const res = await fetchApi("/api/biblioteca");
   if (!res.ok) await manejarError(res);
   return res.json();
 }
@@ -203,9 +289,9 @@ export async function enviarChat(body: {
   contexto_previo: string;
   historial?: { rol: string; contenido: string }[];
 } & ChatFlags): Promise<ChatRespuesta> {
-  const res = await fetch(`${API_URL}/api/chat`, {
+  const res = await fetchApi("/api/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) await manejarError(res);
@@ -215,6 +301,7 @@ export async function enviarChat(body: {
 /** Ping de presencia para medir el tiempo de uso. No bloquea ni lanza error. */
 export async function enviarHeartbeat(conversacionId: string | null): Promise<void> {
   try {
+    // fetch directo, sin reintentos: es analítica y no debe encender el aviso de arranque.
     await fetch(`${API_URL}/api/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(await authHeaders()) },
@@ -227,9 +314,8 @@ export async function enviarHeartbeat(conversacionId: string | null): Promise<vo
 }
 
 export async function cancelarRun(runId: string) {
-  const res = await fetch(`${API_URL}/api/runs/${runId}/cancelar`, {
+  const res = await fetchApi(`/api/runs/${runId}/cancelar`, {
     method: "POST",
-    headers: await authHeaders(),
   });
   if (!res.ok) await manejarError(res);
   return res.json();
@@ -240,10 +326,7 @@ export async function streamRun(
   onEvento: (e: EventoRun) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${API_URL}/api/runs/${runId}/stream`, {
-    headers: await authHeaders(),
-    signal,
-  });
+  const res = await fetchApi(`/api/runs/${runId}/stream`, { signal });
   if (!res.ok || !res.body) await manejarError(res);
 
   const reader = res.body!.getReader();

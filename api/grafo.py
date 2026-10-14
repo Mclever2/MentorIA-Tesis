@@ -7,6 +7,8 @@ como eventos para SSE, revisando el flag de cancelación entre nodos.
 """
 
 import logging
+import re
+import unicodedata
 import threading
 from typing import Iterator, Optional
 
@@ -143,7 +145,14 @@ def recuperar_contextos(doc, seccion: str) -> tuple[str, str, str]:
     )
     from .deps import get_biblioteca
 
-    contexto_tesis = recuperar_contexto(doc.vector_store, seccion)
+    from backend.config import _seccion_rubrica_para
+
+    if _seccion_rubrica_para(seccion) == "1. Título del proyecto":
+        # Por prefijo «1» se recuperaba la carátula y todo el capítulo 1.
+        from .full_review import _texto_unidad_titulo
+        contexto_tesis = _texto_unidad_titulo(doc)
+    else:
+        contexto_tesis = recuperar_contexto(doc.vector_store, seccion)
     contexto_dependencias = recuperar_contexto_cruzado(doc.vector_store, seccion)
     contexto_teorico = recuperar_contexto_teorico(get_biblioteca(), seccion)
     return contexto_tesis, contexto_dependencias, contexto_teorico
@@ -402,6 +411,53 @@ def _secciones_consenso(texto: str) -> dict:
     return out
 
 
+_RE_CAMBIO_APLICADO = re.compile(
+    r"\bse\s+(complet|reformul|reescrib|incluy|incorpor|a[nñ]ad|agreg|elimin|precis|ajust|"
+    r"modific|corrig|simplific|delimit|acort)\w*", re.I)
+
+
+_RAICES_SECCION = {"titulo", "proble", "formul", "objeti", "hipote", "variab", "justif",
+                   "import", "antece", "marco", "supues", "matriz", "operac"}
+
+
+def _raices(texto: str) -> set[str]:
+    plano = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode().lower()
+    return {w[:6] for w in re.findall(r"[a-z]{4,}", plano)}
+
+
+def _cambios_con_bloque(cambios: str, texto_mejorado: str) -> str:
+    """Quita del registro de cambios los que dicen haber reescrito algo que no está.
+
+    El redactor listaba «Objetivos: se completó el tercer objetivo, que estaba
+    incompleto» sin entregar ningún bloque de objetivos (y el objetivo estaba
+    completo). Un cambio «aplicado» solo se muestra si su subpunto tiene bloque en
+    el texto mejorado; las recomendaciones («se recomienda…») se conservan."""
+    cabeceras = [_raices(m.group(1)) for m in re.finditer(r"(?m)^#{2,4}\s*(.+)$", texto_mejorado or "")]
+    if not cabeceras or not cambios:
+        return cambios
+    conservadas = []
+    for linea in cambios.splitlines():
+        etiqueta, sep, resto = linea.partition(":")
+        aplica = bool(_RE_CAMBIO_APLICADO.search(linea)) and not re.search(r"recomienda", linea, re.I)
+        # La portada (línea, sublínea, carátula) nunca se reescribe: un «se corrigió la
+        # línea de investigación a …» anuncia un cambio que no existe y un nombre inventado.
+        if aplica and re.search(r"l[ií]nea\s+de\s+investigaci|subl[ií]nea|car[aá]tula|portada", linea, re.I):
+            logger.warning(f"[núcleo] Cambio sobre la portada descartado: «{linea.strip()[:80]}»")
+            continue
+        if aplica:
+            if sep and len(etiqueta) <= 60:
+                raices = _raices(re.sub(r"^[\s\-*•\d.)]+", "", etiqueta))
+            else:
+                # Sin «Subpunto:» delante («Se completaron las hipótesis…»): el
+                # subpunto se reconoce por las palabras de sección que nombra.
+                raices = _raices(linea) & _RAICES_SECCION
+            if raices and not any(raices & c for c in cabeceras):
+                logger.warning(f"[núcleo] Cambio sin bloque descartado: «{linea.strip()[:80]}»")
+                continue
+        conservadas.append(linea)
+    return "\n".join(conservadas).strip()
+
+
 def _bloque_seccion_md(r: dict) -> str:
     """Bloque markdown LIMPIO de una sección para el chat (compartido por ambos modos)."""
     if r.get("vacia"):
@@ -443,12 +499,13 @@ def _bloque_seccion_md(r: dict) -> str:
             partes.append("**Texto mejorado y justificación por subpunto**\n")
             partes.append(r["texto_mejorado"])
             partes.append("")
-        if r.get("recomendaciones"):
+        cambios = _cambios_con_bloque(r.get("recomendaciones") or "", r.get("texto_mejorado") or "")
+        if cambios:
             partes.append(
                 "**Cambios realizados** (los subpuntos ya en 5/5 no se reescriben: se "
                 "justifica por qué cumplen)\n"
             )
-            partes.append(r["recomendaciones"])
+            partes.append(cambios)
         return "\n".join(partes).strip()
 
     if r.get("recomendaciones"):

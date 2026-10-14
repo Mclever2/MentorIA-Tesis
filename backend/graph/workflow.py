@@ -26,6 +26,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI
 
+from backend.config import modelo_llm
 from .state import MentoriaState
 from .nodes import (
     make_nodo_supervisor,
@@ -66,7 +67,7 @@ def _llm(temperatura: float = 0.3) -> ChatOpenAI:
         )
     return ChatOpenAI(
         api_key=api_key,
-        model="gpt-4o-mini",
+        model=modelo_llm(),
         temperature=temperatura,
         max_retries=3,
         timeout=120.0,

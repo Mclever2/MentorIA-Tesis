@@ -40,13 +40,31 @@ _RE_ENTRADA_TOC = re.compile(
     re.IGNORECASE,
 )
 _UMBRAL_PAGINA_TOC = 0.28
+# Índice SIN puntos guía («1.1.1. Formulación del problema 6»), que es como sale
+# el del formato UPAO al exportarlo a PDF. Sin reconocerlo, cada entrada se
+# tomaba por un encabezado y el estudiante veía ~45 secciones duplicadas con el
+# número de página pegado; peor aún, «1.1. Descripción y delimitación del
+# problema 6» acababa pasando por el TÍTULO del proyecto en los paneles.
+_RE_ENTRADA_TOC_SIN_PUNTOS = re.compile(
+    r'^((?:\d+(?:\.\d+)*\.?|[IVXLC]{1,5}\.)\s*[A-ZÁÉÍÓÚÜÑa-záéíóúüñ][^\n]{2,90}?)\s+(\d{1,3})\s*$'
+)
+_UMBRAL_PAGINA_TOC_SIN_PUNTOS = 0.5
 
 # ── Encabezados en el cuerpo ─────────────────────────────────────────────────
 
-# Numerado: "1.2 Objetivos", "2.3.1. Bases teóricas", "IV. Metodología".
+# Numerado: "1.2 Objetivos", "2.3.1. Bases teóricas", "IV. Metodología", y también
+# pegado al número cuando este acaba en punto ("4.4.Población y muestra"), que es
+# como salen del PDF los subtítulos del formato UPAO. Sin esa variante 4.4–4.7 y
+# 3.3 Variables no existían: su contenido caía dentro de «4.3 Diseño del estudio».
 _RE_ENCABEZADO_NUM = re.compile(
-    r'^\s*(?:\d+(?:\.\d+)*\.?|[IVXLC]{1,5}\.)\s+([A-ZÁÉÍÓÚÜÑa-záéíóúüñ][^\n]{2,90})$'
+    r'^\s*(?:\d+(?:\.\d+)*\.?\s+|\d+(?:\.\d+)*\.(?=[A-ZÁÉÍÓÚÜÑ])|[IVXLC]{1,5}\.\s+)'
+    r'([A-ZÁÉÍÓÚÜÑa-záéíóúüñ][^\n]{2,90})$'
 )
+# Numeración de un solo entero sin punto: "1 Introducción" es un encabezado, pero
+# "1 Laptop Core I5 1 2500.00" (fila de tabla) o "472 del promedio OCDE…" (línea
+# partida del cuerpo) no lo son.
+_RE_ENTERO_MINUSCULA = re.compile(r'^\s*\d+\s+[a-záéíóúüñ]')
+_RE_NUMERO_SUELTO = re.compile(r'(?<![\w.])\d+(?:[.,]\d+)?(?![\w.])')
 # Rótulo canónico sin numerar: "OBJETIVOS", "Marco teórico".
 _SINONIMOS_SECCION = (
     "titulo del proyecto", "titulo", "introduccion", "realidad problematica",
@@ -75,6 +93,8 @@ class ResultadoEstructura:
     estructura: dict[str, int] = field(default_factory=dict)          # nombre → orden
     origen: str = "ninguna"
     avisos: list[str] = field(default_factory=list)
+    sin_redactar: list[str] = field(default_factory=list)  # solo texto de ejemplo del formato
+    titulo: str = ""                                        # título del proyecto, si se halló
 
 
 def _norm(texto: str) -> str:
@@ -92,6 +112,16 @@ def _ratio_lineas_toc(texto_pagina: str) -> float:
     return sum(1 for l in lineas if _RE_LINEA_TOC.search(l)) / len(lineas)
 
 
+def _es_pagina_indice(texto_pagina: str) -> bool:
+    if _ratio_lineas_toc(texto_pagina) >= _UMBRAL_PAGINA_TOC:
+        return True
+    lineas = [l.strip() for l in texto_pagina.split('\n') if l.strip()]
+    if len(lineas) < 5:
+        return False
+    sin_puntos = sum(1 for l in lineas if _RE_ENTRADA_TOC_SIN_PUNTOS.match(l))
+    return sin_puntos / len(lineas) >= _UMBRAL_PAGINA_TOC_SIN_PUNTOS
+
+
 def separar_indice(paginas: list[tuple[int, str]]) -> tuple[list[tuple[int, str]], dict[str, int]]:
     """Aparta las páginas de índice y devuelve (contenido, estructura del índice)."""
     contenido: list[tuple[int, str]] = []
@@ -100,7 +130,7 @@ def separar_indice(paginas: list[tuple[int, str]]) -> tuple[list[tuple[int, str]
     for numero, texto in paginas:
         if not texto or not texto.strip():
             continue
-        if _ratio_lineas_toc(texto) >= _UMBRAL_PAGINA_TOC:
+        if _es_pagina_indice(texto):
             texto_toc.append(texto)
             logger.info(f"Pág. {numero}: índice — excluida del contenido")
         else:
@@ -109,7 +139,7 @@ def separar_indice(paginas: list[tuple[int, str]]) -> tuple[list[tuple[int, str]
     estructura: dict[str, int] = {}
     for texto in texto_toc:
         for linea in texto.split('\n'):
-            m = _RE_ENTRADA_TOC.match(linea.strip())
+            m = _RE_ENTRADA_TOC.match(linea.strip()) or _RE_ENTRADA_TOC_SIN_PUNTOS.match(linea.strip())
             if m:
                 nombre = re.sub(r'\s+', ' ', m.group(1)).strip()
                 try:
@@ -183,10 +213,18 @@ def _es_encabezado(linea: str) -> bool:
     if _RE_LINEA_TOC.search(limpio):          # es una entrada de índice, no un encabezado
         return False
 
-    if _RE_ENCABEZADO_NUM.match(limpio):
-        return True
+    m = _RE_ENCABEZADO_NUM.match(limpio)
+    if m:
+        if _RE_ENTERO_MINUSCULA.match(limpio):
+            return False
+        # Fila de tabla («3 Celular 1 999.00 si 249.75»): el rótulo lleva cifras.
+        return len(_RE_NUMERO_SUELTO.findall(m.group(1))) < 2
 
     clave = _norm(limpio)
+    # La carátula («PROYECTO DE TESIS PARA OPTAR EL TÍTULO…») no es una sección:
+    # tomarla como tal impedía rescatarla como «Título del proyecto».
+    if "para optar el titulo" in clave:
+        return False
     if clave in _SINONIMOS_SECCION:
         return True
     # Rótulo en mayúsculas y corto: "PLANTEAMIENTO DEL PROBLEMA".
@@ -238,6 +276,19 @@ def detectar_encabezados(paginas: list[tuple[int, str]]) -> dict[str, int]:
                 descartados += 1
                 continue
             encontrados[limpio] = numero
+
+    # Un documento numerado (el formato UPAO numera hasta el último subtítulo) no
+    # tiene rótulos sueltos en minúscula: «Población:», «Objetivos» o «hipótesis)»
+    # son celdas de la matriz de consistencia, y cada una partía una sección real
+    # en trozos. Los rótulos en MAYÚSCULAS sí se conservan.
+    numerados = [n for n in encontrados if _RE_ENCABEZADO_NUM.match(n)]
+    if len(numerados) >= 8:
+        for nombre in list(encontrados):
+            letras = [c for c in nombre if c.isalpha()]
+            mayus = letras and sum(c.isupper() for c in letras) / len(letras) > 0.85
+            if nombre not in numerados and not mayus:
+                encontrados.pop(nombre)
+                descartados += 1
 
     if encontrados:
         logger.info(
@@ -462,6 +513,14 @@ def agrupar_por_anclas(
 
 def resolver_estructura(extraido, embeddings=None) -> ResultadoEstructura:
     """Devuelve las secciones del proyecto usando la mejor señal disponible."""
+    resultado = _depurar_plantilla(_resolver_secciones(extraido, embeddings))
+    resultado.titulo = detectar_titulo(resultado.grupos)
+    if resultado.titulo:
+        logger.info(f"Título del proyecto detectado: «{resultado.titulo[:120]}»")
+    return resultado
+
+
+def _resolver_secciones(extraido, embeddings=None) -> ResultadoEstructura:
     resultado = ResultadoEstructura()
     bloques = list(extraido.bloques)
 
@@ -539,6 +598,14 @@ def _con_caratula(resultado: ResultadoEstructura, bloques: list[tuple[int, str]]
     primer_orden = min(o for _, _, o in resultado.grupos)
     previos = [(o, t) for o, t in bloques if o < primer_orden]
     if not previos:
+        # Texto pegado o Word de una sola página: el título va en el MISMO bloque,
+        # justo antes del primer encabezado, y se descartaba sin dejar rastro.
+        primero = next(n for n, _, o in resultado.grupos if o == primer_orden)
+        bloque = dict(bloques).get(primer_orden, "")
+        pos = _posicion_encabezado(bloque, primero)
+        if pos > 0:
+            previos = [(primer_orden, bloque[:pos])]
+    if not previos:
         return resultado
 
     texto = "\n\n".join(t for _, t in sorted(previos)).strip()
@@ -551,3 +618,107 @@ def _con_caratula(resultado: ResultadoEstructura, bloques: list[tuple[int, str]]
     resultado.estructura[nombre] = orden
     logger.info(f"Carátula/preliminares rescatados como «{nombre}» ({len(texto)} chars)")
     return resultado
+
+
+# ── Texto de ejemplo del formato ─────────────────────────────────────────────
+
+# Por debajo de esto, lo que queda tras quitar el relleno es el encabezado y
+# algún resto de tabla: la sección no está redactada.
+_MIN_LETRAS_PROPIAS = 40
+
+
+def _depurar_plantilla(resultado: ResultadoEstructura) -> ResultadoEstructura:
+    """Quita el relleno del formato y aparta las secciones que solo tenían eso.
+
+    Una sección que solo conserva el párrafo de ejemplo NO se indexa: si entrara,
+    contaría como avance en el alcance, el conversador la citaría como contenido
+    del estudiante y la red la calificaría. Se guarda su nombre para decirle al
+    estudiante qué le falta redactar y para responder con honestidad si la pide.
+    """
+    from backend.ingesta.plantilla import letras_propias, quitar_plantilla
+
+    grupos: list[tuple[str, str, int]] = []
+    for nombre, texto, orden in resultado.grupos:
+        limpio = quitar_plantilla(texto)
+        if letras_propias(texto) - letras_propias(limpio) < 8:
+            grupos.append((nombre, texto, orden))
+            continue
+        if letras_propias(limpio, nombre) < _MIN_LETRAS_PROPIAS:
+            resultado.sin_redactar.append(nombre)
+            continue
+        grupos.append((nombre, limpio, orden))
+
+    if not resultado.sin_redactar:
+        return resultado
+
+    if not grupos:
+        # Todo el documento es la plantilla vacía: se conserva tal cual para que
+        # el estudiante reciba una respuesta (y el aviso) en vez de un error.
+        resultado.sin_redactar = []
+        return resultado
+
+    resultado.grupos = grupos
+    resultado.estructura = {n: o for n, _, o in grupos}
+    lista = ", ".join(f"«{n}»" for n in resultado.sin_redactar[:14])
+    if len(resultado.sin_redactar) > 14:
+        lista += f" y {len(resultado.sin_redactar) - 14} más"
+    resultado.avisos.append(
+        f"{len(resultado.sin_redactar)} sección(es) todavía tienen solo el texto de ejemplo "
+        f"del formato, así que no las tomo como tuyas ni las califico: {lista}. "
+        "Cuando las redactes, vuelve a subir el documento."
+    )
+    logger.info(f"Secciones con solo texto de plantilla: {len(resultado.sin_redactar)}")
+    return resultado
+
+
+# ── Título del proyecto ──────────────────────────────────────────────────────
+
+_RE_SE_TITULA = re.compile(r'se\s+titula\s*:?\s*[«"“]([^"»”]{15,300})[»"”]', re.I)
+_RE_TITULO_CARATULA = re.compile(
+    r'para\s+optar\s+el\s+t[ií]tulo\s+profesional\s+de\s+'
+    r'(?:ingenier[oa]|ingenier[ií]a)(?:\s+(?:de|en)\s+computaci[oó]n\s+y\s+sistemas)?\.?\s*'
+    r'(.*?)\s*(?:L[ií]nea\s+de\s+investigaci|Sub\s*l[ií]nea|Autor|$)',
+    re.I,
+)
+_RE_PREFIJO_TITULO = re.compile(r'^\s*t[ií]tulo\s+del\s+proyecto(\s+de\s+tesis)?\s*:?\s*', re.I)
+
+
+def _titulo_valido(candidato: str) -> str:
+    t = _RE_PREFIJO_TITULO.sub("", re.sub(r"\s+", " ", candidato or "")).strip(" .:;-\"'«»“”")
+    return t if 4 <= len(t.split()) <= 45 else ""
+
+
+def detectar_titulo(grupos: list[tuple[str, str, int]]) -> str:
+    """Título del proyecto: la sección «1. Título» o, si no, la carátula.
+
+    Los paneles tomaban como título «la primera línea larga» del contexto de la
+    sección 1, que en un PDF con índice era «1.1. Descripción y delimitación del
+    problema 6»: a partir de ahí inventaban un proyecto ajeno al del estudiante.
+    Si no hay un título real (carátula con el texto del formato), devuelve "".
+    """
+    for nombre, texto, _ in grupos:
+        if not re.match(r'^\s*1\.?\s*T[ií]tulo\b', nombre):
+            continue
+        cuerpo = re.sub(r"\s+", " ", texto)
+        if cuerpo.startswith(nombre):
+            cuerpo = cuerpo[len(nombre):]
+        m = _RE_SE_TITULA.search(cuerpo)
+        if m and _titulo_valido(m.group(1)):
+            return _titulo_valido(m.group(1))
+        if _titulo_valido(cuerpo):
+            return _titulo_valido(cuerpo)
+        primera = re.split(r'(?<=[a-záéíóúñ)\]])\.\s+(?=[A-ZÁÉÍÓÚÑ])', cuerpo.strip())[0]
+        if _titulo_valido(primera):
+            return _titulo_valido(primera)
+
+    for nombre, texto, _ in grupos[:2]:
+        m = _RE_TITULO_CARATULA.search(re.sub(r"\s+", " ", texto))
+        if m and _titulo_valido(m.group(1)):
+            return _titulo_valido(m.group(1))
+
+    # Avance pegado en el chat: «Título: Sistema de…» en la primera línea.
+    for _, texto, _ in grupos[:2]:
+        m = re.search(r"^\s*t[ií]tulo(?:\s+del\s+proyecto)?\s*:\s*(.+)$", texto, re.I | re.M)
+        if m and _titulo_valido(m.group(1)):
+            return _titulo_valido(m.group(1))
+    return ""

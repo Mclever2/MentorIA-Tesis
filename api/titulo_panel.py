@@ -350,7 +350,9 @@ def _nodo_contexto(state: EstadoTitulo) -> dict:
     consulta = state.get("consulta", "")
 
     proyecto = ""
-    titulo_actual = ""
+    # El título detectado al indexar manda sobre el que se deduzca del RAG, que en
+    # un PDF con índice podía ser una entrada del índice.
+    titulo_actual = (getattr(doc, "titulo_proyecto", "") or "").strip() if doc is not None else ""
     if doc is not None and getattr(doc, "vector_store", None) is not None:
         from backend.rag import recuperar_contexto
         # Un título solo se puede juzgar contra el NÚCLEO completo: prometer algo que

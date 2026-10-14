@@ -9,34 +9,23 @@ import { supabase } from "@/lib/supabase";
 
 export default function Auth() {
   const navigate = useNavigate();
-  const [modo, setModo] = useState<"login" | "registro">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [verPassword, setVerPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [aviso, setAviso] = useState<string | null>(null);
   const [cargando, setCargando] = useState(false);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!supabase) return;
     setError(null);
-    setAviso(null);
     setCargando(true);
     try {
-      if (modo === "registro") {
-        const { data, error } = await supabase.auth.signUp({ email, password });
-        if (error) throw error;
-        if (data.session) {
-          navigate("/app");
-        } else {
-          setAviso("Revisa tu correo para confirmar la cuenta y luego inicia sesión.");
-        }
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        navigate("/app");
-      }
+      // Solo inicio de sesión: las cuentas las da de alta el equipo del estudio,
+      // no se crean desde aquí.
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      navigate("/app");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "Error de autenticación");
     } finally {
@@ -68,19 +57,7 @@ export default function Auth() {
         </Link>
 
         <div className="glass rounded-3xl p-8">
-          <div className="bg-muted rounded-xl p-1 grid grid-cols-2 text-sm font-medium">
-            {(["login", "registro"] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => { setModo(m); setError(null); setAviso(null); }}
-                className={`py-1.5 rounded-lg transition-all ${
-                  modo === m ? "bg-card shadow-sm" : "text-muted-foreground"
-                }`}
-              >
-                {m === "login" ? "Iniciar sesión" : "Crear cuenta"}
-              </button>
-            ))}
-          </div>
+          <h1 className="text-center text-lg font-semibold">Iniciar sesión</h1>
 
           <form onSubmit={onSubmit} className="mt-6 space-y-4">
             <div>
@@ -121,13 +98,10 @@ export default function Auth() {
             {error && (
               <p className="text-sm text-destructive bg-destructive/10 rounded-xl px-3.5 py-2.5">{error}</p>
             )}
-            {aviso && (
-              <p className="text-sm text-accent-foreground bg-accent rounded-xl px-3.5 py-2.5">{aviso}</p>
-            )}
 
             <Button type="submit" disabled={cargando} className="w-full rounded-xl h-11 text-base">
               {cargando && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
-              {modo === "login" ? "Entrar" : "Registrarme"}
+              Entrar
             </Button>
           </form>
         </div>

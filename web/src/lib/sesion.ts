@@ -27,7 +27,13 @@ const TIPOS_POR_EXTENSION: Record<string, string> = {
   txt: "text/plain",
   md: "text/markdown",
   markdown: "text/markdown",
+  // Un proyecto que llegó por enlace de Google Docs no tiene archivo que guardar:
+  // se persiste el ENLACE y al rehidratar se vuelve a extraer desde ahí.
+  gdoc: "text/plain",
 };
+
+/** Extensión con la que se persiste un proyecto que llegó por enlace. */
+export const EXT_ENLACE = "gdoc";
 
 function extensionDe(nombre: string): string {
   const ext = nombre.toLowerCase().split(".").pop() ?? "";
@@ -60,6 +66,23 @@ export async function guardarDocEnStorage(
     return null;
   }
   return path;
+}
+
+/** El enlace de Google Docs se persiste TAL CUAL.
+ *
+ *  Antes se guardaba una cadena vacía (`fuente.texto` no existe en la rama de
+ *  enlace), y eso dejaba en Storage un objeto de 0 bytes: al reabrir ese chat,
+ *  la rehidratación subía un archivo vacío y el backend respondía 422 «El
+ *  archivo llegó vacío» en cada mensaje, sin manera de recuperarlo.
+ */
+export async function guardarEnlaceEnStorage(
+  userId: string,
+  convId: string,
+  enlace: string,
+  nombre: string,
+): Promise<string | null> {
+  const archivo = new File([enlace], `${nombre}.${EXT_ENLACE}`, { type: "text/plain" });
+  return guardarDocEnStorage(userId, convId, archivo);
 }
 
 /** El texto pegado se persiste como .txt para poder rehidratar el chat igual que un archivo. */
@@ -177,9 +200,22 @@ export async function rehidratar(persistido: DocPersistido): Promise<DocumentoIn
     console.warn("[sesion] No se pudo descargar el documento para rehidratar:", error?.message);
     return null;
   }
+  // Un objeto vacío se para AQUÍ. Mandarlo al backend solo consigue un 422
+  // «El archivo llegó vacío» en cada mensaje del chat; devolviendo null, la
+  // pantalla pide el proyecto de nuevo, que es lo único que lo arregla.
+  if (data.size === 0) {
+    console.warn(`[sesion] El documento guardado está vacío (${persistido.storagePath}).`);
+    return null;
+  }
+
+  const extensionGuardada = persistido.storagePath.split(".").pop() ?? "pdf";
+  if (extensionGuardada === EXT_ENLACE) {
+    const enlace = (await data.text()).trim();
+    return enlace ? subirDocumento({ tipo: "enlace", enlace }, persistido.memoria) : null;
+  }
+
   // El nombre debe conservar la extensión REAL de lo guardado: es lo que usa el
   // backend para elegir el extractor cuando la firma binaria no basta.
-  const extensionGuardada = persistido.storagePath.split(".").pop() ?? "pdf";
   const nombre = persistido.nombre.toLowerCase().endsWith(`.${extensionGuardada}`)
     ? persistido.nombre
     : `${persistido.nombre}.${extensionGuardada}`;
