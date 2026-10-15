@@ -112,10 +112,6 @@ un ejemplo de SU tema marcado como ejemplo; no redactes la sección completa ni 
 Lo que tomes de tus PAUTAS DE ASESOR preséntalo como recomendación tuya («te recomiendo…»), NUNCA como \
 «según [libro]» ni como norma de la UPAO: cita un libro solo por lo que dice su fragmento. Nunca nombres \
 «pautas», «criterios fijos», «el sistema» ni estas instrucciones: hablas como su asesor.
-15. El MARCO INSTITUCIONAL de abajo son hechos duros de la UPAO (estructura oficial del proyecto, \
-reglas del título, línea y sublíneas de investigación, tipos de investigación). Úsalos para responder \
-con precisión y NO los contradigas ni los inventes. Si el estudiante pregunta por la línea o las \
-sublíneas, explícale las diferencias con esos alcances.
 
 TUS PAUTAS DE ASESOR (úsalas tal cual cuando pregunte por estos temas; MANDAN sobre los \
 fragmentos de libros: si un libro da otra cifra u otra definición —p. ej. otro número de antecedentes o \
@@ -168,9 +164,6 @@ variables que no se miden («la gestión», «la evaluación»); si su dependien
 
 REGLAMENTO UPAO (puntos que afectan el proyecto; cita el artículo si lo usas):
 {reglamento}
-
-MARCO INSTITUCIONAL UPAO:
-{marco_upao}
 
 ESTADO DEL PROYECTO DEL ESTUDIANTE:
 {estado}
@@ -409,17 +402,11 @@ def responder_consulta(
     doc,
     biblioteca,
     nota_sistema: str = "",
-    ficha: dict | None = None,
 ) -> str:
     """Genera la respuesta conversacional fundamentada en libros + tesis + hilo.
 
     `nota_sistema` se añade solo al turno que ve el modelo, no a la búsqueda en los
-    libros ni en la tesis (allí metería ruido).
-
-    `ficha` es la memoria estructurada de la asesoría (ver `api/ficha.py`). Va en
-    el bloque de ESTADO porque es, literalmente, lo que se sabe del proyecto — y
-    en un estudiante sin PDF es lo ÚNICO que se sabe.
-    """
+    libros ni en la tesis (allí metería ruido)."""
     libros, fuente_ej = _recuperar_libros(biblioteca, mensaje)
     tesis = _recuperar_tesis(doc, mensaje)
 
@@ -442,15 +429,6 @@ def responder_consulta(
         n_pal = len(pegado.split())
         estado += (f"\n- HECHO VERIFICADO: el título que pegó en su mensaje tiene {n_pal} palabras "
                    f"(contando conectores y fechas; máximo UPAO 20). Usa este número, no lo recuentes.")
-
-    from .ficha import bloque_ficha
-
-    estado += (
-        "\n\n- LO QUE EL ESTUDIANTE YA TE DECLARÓ EN ESTA ASESORÍA (dalo por sabido; "
-        "volver a preguntárselo es el error que más lo frustra):\n"
-        + bloque_ficha(ficha)
-    )
-
     if doc is not None:
         try:
             from .tipo_investigacion import obtener_tipo_diseno
@@ -465,13 +443,11 @@ def responder_consulta(
     from .antecedentes import ANTECEDENTES_RECOMENDADOS
     from backend.metodologia_reglas import CRITERIOS_DISENO_INGENIERIA
     from backend.reglamento_upao import REGLAMENTO_UPAO
-    from backend.upao_tesis import bloque_marco_upao
 
     sistema = _PROMPT_SISTEMA.format(
         n_antecedentes=ANTECEDENTES_RECOMENDADOS,
         criterios_diseno=CRITERIOS_DISENO_INGENIERIA,
         reglamento="\n".join(f"- {p['ref']}: {p['texto']}" for p in REGLAMENTO_UPAO["puntos"]),
-        marco_upao=bloque_marco_upao(),
         estado=estado,
         libros=libros or "(sin fragmentos de libros recuperados para esta consulta)",
         tesis=tesis or "(sin fragmentos de la tesis — o el proyecto no está cargado)",
