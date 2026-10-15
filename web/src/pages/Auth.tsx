@@ -9,23 +9,45 @@ import { supabase } from "@/lib/supabase";
 
 export default function Auth() {
   const navigate = useNavigate();
+  // Solo dos modos: iniciar sesión y recuperar contraseña. El registro está
+  // deshabilitado: las cuentas las crea el administrador desde Supabase.
+  const [modo, setModo] = useState<"login" | "recuperar">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [verPassword, setVerPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [aviso, setAviso] = useState<string | null>(null);
   const [cargando, setCargando] = useState(false);
+
+  function cambiarModo(m: "login" | "recuperar") {
+    setModo(m);
+    setError(null);
+    setAviso(null);
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!supabase) return;
     setError(null);
+    setAviso(null);
     setCargando(true);
     try {
-      // Solo inicio de sesión: las cuentas las da de alta el equipo del estudio,
-      // no se crean desde aquí.
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
-      navigate("/app");
+      if (modo === "recuperar") {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          // Supabase envía un correo con un enlace que apunta AQUÍ. La URL debe
+          // estar en la allowlist de Supabase → Authentication → URL Configuration
+          // → Redirect URLs.
+          redirectTo: `${window.location.origin}/recuperar`,
+        });
+        if (error) throw error;
+        setAviso(
+          "Si ese correo tiene una cuenta, te enviamos un enlace para restablecer tu contraseña. Revisa tu bandeja de entrada (y spam).",
+        );
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        navigate("/app");
+      }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "Error de autenticación");
     } finally {
@@ -57,7 +79,16 @@ export default function Auth() {
         </Link>
 
         <div className="glass rounded-3xl p-8">
-          <h1 className="text-center text-lg font-semibold">Iniciar sesión</h1>
+          <div className="text-center">
+            <h1 className="text-xl font-semibold tracking-tight">
+              {modo === "login" ? "Iniciar sesión" : "Recuperar contraseña"}
+            </h1>
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              {modo === "login"
+                ? "Ingresa con la cuenta que te asignaron."
+                : "Te enviaremos un enlace para crear una nueva contraseña."}
+            </p>
+          </div>
 
           <form onSubmit={onSubmit} className="mt-6 space-y-4">
             <div>
@@ -71,38 +102,63 @@ export default function Auth() {
                 className="mt-1.5 w-full rounded-xl border border-input bg-card px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
-            <div>
-              <label className="text-sm font-medium">Contraseña</label>
-              <div className="relative mt-1.5">
-                <input
-                  type={verPassword ? "text" : "password"}
-                  required
-                  minLength={6}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Mínimo 6 caracteres"
-                  className="w-full rounded-xl border border-input bg-card pl-3.5 pr-11 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                />
-                <button
-                  type="button"
-                  onClick={() => setVerPassword((v) => !v)}
-                  title={verPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-                  aria-label={verPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 grid place-items-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                >
-                  {verPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
+
+            {modo === "login" && (
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium">Contraseña</label>
+                  <button
+                    type="button"
+                    onClick={() => cambiarModo("recuperar")}
+                    className="text-xs font-medium text-primary hover:underline"
+                  >
+                    ¿Olvidaste tu contraseña?
+                  </button>
+                </div>
+                <div className="relative mt-1.5">
+                  <input
+                    type={verPassword ? "text" : "password"}
+                    required
+                    minLength={6}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Tu contraseña"
+                    className="w-full rounded-xl border border-input bg-card pl-3.5 pr-11 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setVerPassword((v) => !v)}
+                    title={verPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
+                    aria-label={verPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 grid place-items-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  >
+                    {verPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
             {error && (
               <p className="text-sm text-destructive bg-destructive/10 rounded-xl px-3.5 py-2.5">{error}</p>
             )}
+            {aviso && (
+              <p className="text-sm text-accent-foreground bg-accent rounded-xl px-3.5 py-2.5">{aviso}</p>
+            )}
 
             <Button type="submit" disabled={cargando} className="w-full rounded-xl h-11 text-base">
               {cargando && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
-              Entrar
+              {modo === "login" ? "Entrar" : "Enviar enlace de recuperación"}
             </Button>
+
+            {modo === "recuperar" && (
+              <button
+                type="button"
+                onClick={() => cambiarModo("login")}
+                className="w-full text-center text-sm text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Volver a iniciar sesión
+              </button>
+            )}
           </form>
         </div>
 

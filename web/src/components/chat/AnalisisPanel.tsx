@@ -458,10 +458,10 @@ function TabMetricas({ d }: { d: AnalisisDetalle }) {
     >
       <p className="text-xs text-muted-foreground mb-3">
         Evaluación independiente con la rúbrica de tu <span className="font-medium text-foreground">
-        tipo de investigación</span> (escala /100). Es más detallada que la ficha UPAO, pero mide si
-        tu proyecto está <span className="font-medium text-foreground">bien construido
-        metodológicamente</span> — NO si cumple la rúbrica UPAO. Tu calificación oficial por ítem
-        está en la pestaña <span className="font-medium text-foreground">Rúbrica</span>.
+        tipo de investigación</span> (sobre {juez.calificacion.maximo} pts). Es más detallada que la
+        ficha UPAO, pero mide si tu proyecto está <span className="font-medium text-foreground">bien
+        construido metodológicamente</span> — NO si cumple la rúbrica UPAO. Tu calificación oficial
+        por ítem está en la pestaña <span className="font-medium text-foreground">Rúbrica</span>.
       </p>
       <ul>
         {juez.calificacion.items.map((it, i) => (

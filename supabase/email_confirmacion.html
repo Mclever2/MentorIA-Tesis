@@ -1,0 +1,103 @@
+<!--
+  Plantilla del correo "Confirm signup" de MentorIA.
+
+  Dónde pegarla: Supabase → Authentication → Emails → Templates → "Confirm signup".
+    - Subject: Confirma tu correo para empezar en MentorIA 🎓
+    - Body (HTML): todo el contenido de este archivo.
+
+  Variables de Supabase usadas: {{ .ConfirmationURL }} (enlace de confirmación).
+  Diseño con tablas + estilos inline: es lo único que respetan Gmail/Outlook.
+-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="background-color:#f2f4f8;padding:32px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+             style="max-width:520px;background-color:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,0.08);">
+
+        <!-- Encabezado con degradado -->
+        <tr>
+          <td align="center"
+              style="background:linear-gradient(135deg,#007AFF 0%,#5856D6 100%);background-color:#007AFF;padding:36px 24px 30px;">
+            <div style="font-size:40px;line-height:1;">🎓</div>
+            <div style="margin-top:10px;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.3px;">
+              MentorIA
+            </div>
+            <div style="margin-top:4px;font-size:13px;color:rgba(255,255,255,0.85);">
+              Tu red de agentes para el proyecto de tesis
+            </div>
+          </td>
+        </tr>
+
+        <!-- Cuerpo -->
+        <tr>
+          <td style="padding:34px 36px 8px;">
+            <h1 style="margin:0;font-size:20px;font-weight:700;color:#0f172a;letter-spacing:-0.2px;">
+              ¡Ya casi está! Confirma tu correo
+            </h1>
+            <p style="margin:14px 0 0;font-size:14.5px;line-height:1.65;color:#475569;">
+              Gracias por crear tu cuenta en <strong>MentorIA</strong>. Solo falta un paso:
+              confirma que este correo es tuyo y podrás subir tu proyecto de tesis para que
+              la red de agentes lo revise contigo — con la rúbrica oficial UPAO, sección por sección.
+            </p>
+          </td>
+        </tr>
+
+        <!-- Botón -->
+        <tr>
+          <td align="center" style="padding:26px 36px 10px;">
+            <a href="{{ .ConfirmationURL }}"
+               style="display:inline-block;background-color:#007AFF;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:14px 40px;border-radius:14px;">
+              Confirmar mi correo
+            </a>
+          </td>
+        </tr>
+
+        <!-- Enlace alternativo -->
+        <tr>
+          <td style="padding:18px 36px 6px;">
+            <p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">
+              Si el botón no funciona, copia y pega este enlace en tu navegador:
+              <br />
+              <a href="{{ .ConfirmationURL }}" style="color:#007AFF;word-break:break-all;">{{ .ConfirmationURL }}</a>
+            </p>
+          </td>
+        </tr>
+
+        <!-- Qué te espera -->
+        <tr>
+          <td style="padding:22px 36px 8px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                   style="background-color:#f8fafc;border-radius:14px;">
+              <tr>
+                <td style="padding:16px 20px;">
+                  <p style="margin:0 0 8px;font-size:12.5px;font-weight:700;color:#334155;text-transform:uppercase;letter-spacing:0.4px;">
+                    Qué te espera dentro
+                  </p>
+                  <p style="margin:0;font-size:13px;line-height:1.9;color:#475569;">
+                    ✔️ Revisión completa de tu proyecto con la rúbrica oficial UPAO (0–3, nota vigesimal)<br />
+                    ✔️ Agentes especializados: auditor, metodólogo y redactor debatiendo tu texto<br />
+                    ✔️ Tus asesorías quedan guardadas en tu cuenta, solo tú puedes verlas
+                  </p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Pie -->
+        <tr>
+          <td align="center" style="padding:22px 36px 30px;">
+            <p style="margin:0;font-size:11.5px;line-height:1.6;color:#94a3b8;">
+              Si tú no creaste esta cuenta, puedes ignorar este correo con tranquilidad:
+              sin la confirmación, la cuenta no se activa.
+              <br /><br />
+              MentorIA · Proyecto de investigación — Ingeniería de Computación y Sistemas, UPAO
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
