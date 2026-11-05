@@ -59,7 +59,7 @@ cmap = plt.get_cmap("Greys")
 for ax, vals, ns, title in zip(axes, [gc_v, ge_v], [gc_n, ge_n], ["Grupo Control", "Grupo Experimental"]):
     masked = np.ma.masked_invalid(vals)
     im = ax.imshow(masked, cmap=cmap, vmin=0, vmax=100, aspect="auto")
-    ax.set_xticks(range(5)); ax.set_xticklabels(["Semana 4", "Semana 5", "Semana 6", "Semana 7", "Semana 9"], fontsize=7)
+    ax.set_xticks(range(5)); ax.set_xticklabels(["Sem. 4", "Sem. 5", "Sem. 6", "Sem. 7", "Sem. 9"], fontsize=6.5)
     ax.set_yticks(range(15)); ax.set_yticklabels(dims)
     ax.set_title(title, fontsize=9)
     ax.tick_params(length=0)

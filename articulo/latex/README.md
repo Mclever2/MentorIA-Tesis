@@ -1,13 +1,20 @@
-# Manuscrito en formato IEEE Transactions on Learning Technologies
+# Manuscrito en formato IEEE (LaTeX)
 
-Versión en inglés del artículo, maquetada con la clase `IEEEtran` (modo *journal*, dos columnas,
-sin color, figuras en escala de grises), lista para enviar por ScholarOne como PDF.
+Artículo maquetado con la clase `IEEEtran` (modo *journal*, dos columnas, sin color, figuras en
+escala de grises), listo para enviar por ScholarOne como PDF.
+
+- `main_es.tex` es el **manuscrito principal, en español**, con `babel` español (rótulos TABLA,
+  Fig., Referencias, Resumen) y, como exigen las revistas IEEE bilingües, título, *abstract* e
+  *index terms* también en inglés. Apto para IEEE-RITA e IEEE Latin America Transactions.
+- `main.tex` es la misma versión **en inglés**, con la cabecera de IEEE Transactions on Learning
+  Technologies, por si se decide traducir el envío.
 
 ## Archivos
 
 | Archivo | Contenido |
 |---|---|
-| `main.tex` | Manuscrito completo (título, resumen, *index terms*, IMRAD, conclusiones, agradecimientos, disponibilidad de datos, biografías). |
+| `main_es.tex` / `main_es.pdf` | Manuscrito en español (12 páginas). Usa las figuras en español de `../figuras/`. |
+| `main.tex` | Manuscrito en inglés (título, resumen, *index terms*, IMRAD, conclusiones, agradecimientos, disponibilidad de datos, biografías). |
 | `references.bib` | 39 referencias en BibTeX; se formatean con `IEEEtran.bst` (estilo numérico IEEE). |
 | `figures/` | Tres figuras en PDF y PNG a 600 ppp, en escala de grises y con rótulos en inglés. |
 | `make_figures.py` | Regenera las figuras a partir de los datos del informe de tesis (Tablas 11 a 15, 25 y 27; Figura 8). |
@@ -21,7 +28,8 @@ Requiere TeX Live con `IEEEtran`, `booktabs`, `multirow` e `hyperref` (en Debian
 `references.bib` y la carpeta `figures/`.
 
 ```bash
-latexmk -pdf main.tex
+latexmk -pdf main_es.tex   # español
+latexmk -pdf main.tex      # inglés
 ```
 
 Para regenerar las figuras (necesita `matplotlib`):

@@ -7,8 +7,9 @@ Todo se construyó a partir de **Informe de Tesis v14** (`Informe_de_Tesis_-_v14
 
 | Archivo | Qué es | Para qué revista |
 |---|---|---|
-| `latex/main.pdf` (y fuentes `latex/main.tex`, `latex/references.bib`, `latex/figures/`) | Manuscrito **en inglés**, formato **IEEE Transactions on Learning Technologies** (clase IEEEtran, dos columnas, blanco y negro, citas numéricas IEEE, 11 páginas). | Primera opción recomendada (Q1, gratis, LaTeX). Con cambio de plantilla sirve para ETHE, IJAIED o Education and Information Technologies. |
+| `latex/main_es.pdf` (fuentes `latex/main_es.tex`, `latex/references.bib`, `figuras/`) | **Manuscrito principal, en español**, formato IEEE (clase IEEEtran, dos columnas, blanco y negro, citas numéricas IEEE, 12 páginas). En inglés quedan solo el título secundario, el *abstract*, los *index terms*, los nombres propios de herramientas y modelos, las siglas internacionales y los títulos originales de las referencias publicadas en inglés. | IEEE-RITA o IEEE Latin America Transactions (ambas aceptan español con plantilla IEEE). |
 | `articulo_imrad.md` y `articulo_imrad.docx` | Borrador **en español**, APA 7, con figuras en escala de grises y encabezados en negro. | RIED o Pixel-Bit (ambas en Word). |
+| `latex/main.pdf` (fuente `latex/main.tex`, `latex/figures/`) | Versión **en inglés** del mismo manuscrito, formato IEEE Transactions on Learning Technologies (11 páginas). | Solo si se decide traducir: TLT, o ETHE e IJAIED con cambio de plantilla. |
 | `figuras/` y `latex/figures/` | Las mismas tres figuras en español e inglés, regeneradas en escala de grises a partir de los datos de la tesis. | Ambas versiones. |
 | `seleccion_revista.md` | Respuesta al prompt del curso: 13 revistas Q1/Q2 gratuitas ordenadas por relevancia, descartes por costo, recomendación y checklist de envío. | Entrega del curso. |
 | `00_lineamientos_imrad.md` | Reglas de Codina (2022) y del curso, mapa tesis→artículo y checklist general. | Referencia. |
@@ -17,8 +18,8 @@ Todo se construyó a partir de **Informe de Tesis v14** (`Informe_de_Tesis_-_v14
 
 | Decisión | Elección | Motivo |
 |---|---|---|
-| Revista y formato principal | IEEE Transactions on Learning Technologies, IEEEtran, inglés | Única combinación de Q1 + costo cero + plantilla LaTeX + pertinencia alta (sistemas multiagente con LLM en educación). |
-| Idioma | Inglés en el manuscrito principal; se conserva la versión en español | Todas las Q1/Q2 gratuitas con plantilla LaTeX publican en inglés; RIED y Pixel-Bit aceptan español pero trabajan en Word. |
+| Idioma | **Español** en el manuscrito principal | Es el idioma del artículo. En un artículo en español con formato IEEE se mantienen en inglés, por convención de las revistas bilingües (IEEE-RITA, RIED): el título secundario, el *abstract* y los *index terms* (además del resumen y las palabras clave en español); los nombres propios de herramientas y modelos (MentorIA, LangGraph, gpt-4.1, ChatGPT, Python, pandas, Seaborn, ScholarOne); las siglas internacionales (LLM, TRL, ORCID, CC BY, APC); y los títulos de las referencias publicadas en inglés, que nunca se traducen. Los nombres de pruebas y estadísticos van en su forma española (d de Cohen, g de Hedges, U de Mann-Whitney, kappa de Fleiss). |
+| Formato principal | Clase IEEEtran con `babel` español (TABLA, Fig., Referencias, Resumen) | Es la plantilla de IEEE-RITA e IEEE Latin America Transactions, las revistas IEEE que publican en español. La versión en inglés (TLT) se conserva por si se decide traducir. |
 | Figuras | Tres, regeneradas en escala de grises con marcadores y trazos distintos por grupo | La revista no acepta color; las figuras originales de la tesis eran azul y naranja. La Figura 11 del informe se redibuja solo con medias (el rango intercuartílico no está en las tablas). |
 | Tablas | 7 en el PDF IEEE (I a VII), cuatro de ellas a doble columna | Las tablas por proyecto (Tablas 11 a 15 del informe) van a material suplementario. |
 | Resumen | Un solo párrafo de unas 245 palabras, con *index terms* | Formato IEEE; la versión en español mantiene el resumen estructurado que piden RIED e Informatics in Education. |
@@ -52,7 +53,7 @@ Correspondencia entre el informe y el artículo (ambas versiones):
 
 ## 3. Pendientes que solo el autor puede resolver
 
-1. **Confirmar el cuartil en Scimago** de la revista elegida (`https://www.scimagojr.com/journalsearch.php?q=1939-1382` para TLT). El sitio bloquea el acceso automatizado desde este entorno; los cuartiles de `seleccion_revista.md` vienen de las webs de las revistas y de agregadores.
+1. **Confirmar el cuartil en Scimago** de la revista elegida (`https://www.scimagojr.com/journalsearch.php?q=1932-8540` para IEEE-RITA; `q=1138-2783` para RIED; `q=1939-1382` para TLT). El sitio bloquea el acceso automatizado desde este entorno; los cuartiles de `seleccion_revista.md` vienen de las webs de las revistas y de agregadores. Confirmar también el límite de páginas de IEEE-RITA en su guía de autores.
 2. **ORCID de los tres autores.** IEEE no permite enviar sin ORCID de todos; en la tesis los de los tesistas están vacíos.
 3. **Correo institucional de correspondencia** (en el manuscrito figura el personal) y revisión de las **biografías** de los autores, redactadas de forma genérica.
 4. **Descripción de MentorIA.** La tesis v14 no describe la arquitectura; el apartado II-C se redactó desde el repositorio. Confirmar los nombres de los agentes y el modelo: la tesis dice que gpt-4o-mini es uno de los modelos que emplea MentorIA; el README del repositorio dice `llama-3.3-70b-versatile` vía Groq. Debe quedar un solo dato coherente en tesis, artículo y repositorio.
